@@ -1,0 +1,9 @@
+{
+  "name": "Bimax Pitch Deck Generator",
+  "id": "bimax-pitch-deck-generator",
+  "api": "1.0.0",
+  "main": "code.js",
+  "capabilities": [],
+  "enableProposedApi": false,
+  "editorType": ["figma"]
+}

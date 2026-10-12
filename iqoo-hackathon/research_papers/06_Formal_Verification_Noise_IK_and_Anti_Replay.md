@@ -1,0 +1,491 @@
+# Formal Security Verification of Modern Authenticated Key Exchange Protocols: Noise_IK, WireGuard, and Sliding Window Anti-Replay Dynamics
+
+The engineering of modern secure network tunnels has shifted away from monolithic, dynamically negotiated protocol suites toward minimal, cryptographically opinionated designs. Early standards such as Internet Key Exchange (IKEv1 and IKEv2) and OpenVPN/TLS introduced significant protocol complexity through algorithm negotiation, large abstract syntax notations, and multi-mode state machines. These factors historically expanded attack surfaces to include downgrade exploits, state confusion vulnerabilities, and implementation bugs.
+
+To establish mathematically bounded trust, modern architectures—exemplified by Trevor Perrin’s Noise Protocol Framework and Jason A. Donenfeld’s WireGuard—rely on fixed cryptographic primitives, sequential transcript hashing, and minimal round-trip exchanges.
+
+When these modern protocols are deployed over non-native network transports, such as multiplexed WebSocket streams and application-layer relays, new cross-layer interactions arise. The friction between stateful anti-replay bitmask algorithms (RFC 4303 and RFC 6479) and underlying transport characteristics introduces performance trade-offs, potential denial-of-service vectors, and subtle verification challenges.
+
+---
+
+## 1. Foundations of the Noise Protocol Framework and Verification of Noise_IK
+
+The Noise Protocol Framework defines a system for describing two-party authenticated key exchange (AKE) protocols based on Diffie-Hellman (DH) key agreement. Rather than supporting runtime negotiation, a Noise protocol fixes its cryptographic primitives and message sequences into a formal handshake pattern. Handshake patterns are constructed from a sequence of atomic cryptographic tokens executed by the initiator and the responder.
+
+The concrete instantiation Noise_IK_25519_ChaChaPoly_BLAKE2s uses Curve25519 (X25519) for Montgomery-curve scalar multiplication, ChaCha20-Poly1305 as the authenticated encryption with associated data (AEAD) primitive, and BLAKE2s for hashing and HMAC-based key derivation.
+
+### State Machine Formalization and Transcript Hashing
+
+The internal operational state of a Noise session is divided into three nested structures: the CipherState, the SymmetricState, and the HandshakeState.
+
+The CipherState maintains a symmetric cipher key $k$ and a monotonically increasing 64-bit integer nonce $n$, handling payload encryption and decryption.
+
+The SymmetricState wraps the CipherState and tracks two 32-byte fields: the chaining key $ck$, which absorbs intermediate Diffie-Hellman entropy, and the handshake transcript hash $h$, which provides cryptographic binding across all transmitted and received messages.
+
+The HandshakeState wraps the SymmetricState and manages the long-term static keypairs $(s, S)$ and ephemeral keypairs $(e, E)$ for both local and remote parties.
+
+The protocol is initialized by absorbing the fully qualified protocol name into the transcript:
+
+$$h_0 = \text{BLAKE2s}(\text{"Noise\_IK\_25519\_ChaChaPoly\_BLAKE2s"})$$
+
+$$ck_0 = h_0$$
+
+If an optional out-of-band prologue $p$ is specified, the transcript incorporates it via $h_1 = \text{MixHash}(h_0, p) = \text{BLAKE2s}(h_0 \parallel p)$.
+
+The IK pattern designates that the responder’s static public key $S_r$ is known to the initiator before the handshake begins. This prior knowledge is formalized in the pre-message pattern stage ($\leftarrow s$), which updates the handshake hash prior to network transmission:
+
+$$h_2 = \text{MixHash}(h_1, S_r) = \text{BLAKE2s}(h_1 \parallel S_r)$$
+
+The first interactive flight ($\rightarrow e, es, s, ss$) is initiated by the sender. The initiator generates a fresh ephemeral keypair $(e_i, E_i)$, appends the cleartext public key $E_i$ to the message, and updates the transcript hash:
+
+$$h_3 = \text{MixHash}(h_2, E_i) = \text{BLAKE2s}(h_2 \parallel E_i)$$
+
+The initiator then executes the first Diffie-Hellman operation between its ephemeral private key and the responder's static public key, deriving $SS_{es} = \text{X25519}(e_i, S_r)$. This secret is mixed into the chaining key and initializes intermediate encryption:
+
+$$(ck_1, k_1) = \text{HKDF-BLAKE2s}(ck_0, SS_{es})$$
+
+Using $k_1$ with nonce $n=0$ and associated data $h_3$, the initiator encrypts its static public key $S_i$, yielding ciphertext $c_s = \text{EncryptWithAd}(k_1, 0, h_3, S_i)$. The transcript absorbs this ciphertext:
+
+$$h_4 = \text{MixHash}(h_3, c_s) = \text{BLAKE2s}(h_3 \parallel c_s)$$
+
+Next, the static-static Diffie-Hellman operation $SS_{ss} = \text{X25519}(s_i, S_r)$ is computed and passed through HKDF:
+
+$$(ck_2, k_2) = \text{HKDF-BLAKE2s}(ck_1, SS_{ss})$$
+
+Any zero-round-trip (0-RTT) payload accompanying this flight is encrypted under $k_2$ with associated data $h_4$, concluding the first message.
+
+The second interactive flight ($\leftarrow e, ee, se$) is generated by the responder. The responder samples a fresh ephemeral keypair $(e_r, E_r)$, sends $E_r$ in the clear, and updates the transcript hash:
+
+$$h_5 = \text{MixHash}(h_4, E_r) = \text{BLAKE2s}(h_4 \parallel E_r)$$
+
+The responder then computes the ephemeral-ephemeral exchange $SS_{ee} = \text{X25519}(e_r, E_i)$ and mixes it into the chaining key:
+
+$$(ck_3, k_3) = \text{HKDF-BLAKE2s}(ck_2, SS_{ee})$$
+
+Finally, the responder computes the static-ephemeral exchange $SS_{se} = \text{X25519}(s_r, E_i)$ and derives the terminal chaining key:
+
+$$(ck_4, k_4) = \text{HKDF-BLAKE2s}(ck_3, SS_{se})$$
+
+Any handshake response payload is encrypted under $k_4$ with associated data $h_5$.
+
+Both entities then invoke the $\text{Split}(ck_4)$ operation, running HKDF to generate two 32-byte keys, $tk_{init}$ and $tk_{resp}$, providing distinct symmetric keys for bidirectional data transport.
+
+### Symbolic Verification Analysis: Invariants, Guarantees, and KCI Resistance
+
+Automated verification of Noise_IK within symbolic provers such as ProVerif and Tamarin (specifically through automated model extractors like NoiseExplorer) evaluates security properties against an active Dolev-Yao adversary.
+
+In this model, the adversary controls the communication medium, can inject, drop, or alter packets, and may selectively compromise long-term or ephemeral secrets.
+
+| Security Property | Evaluation on Message 1 (→) | Evaluation on Message 2 (←) | Post-Handshake Transport Phase |
+| :--- | :--- | :--- | :--- |
+| Confidentiality / Secrecy | Weak secrecy; relies on $S_r$ and $E_i$. Vulnerable to passive decryption if $s_r$ is leaked. | Strong secrecy; protected by the ephemeral-ephemeral contribution $SS_{ee}$. | Cryptographic secrecy bounded by AEAD construction under $tk_{init}$ and $tk_{resp}$. |
+| Perfect Forward Secrecy (PFS) | None; compromise of $s_r$ allows retroactive recovery of $SS_{es}$ and $SS_{ss}$. | Strong PFS established; past sessions remain secure despite subsequent compromise of $s_i$ or $s_r$. | Full forward secrecy preserved through erasure of $e_i$ and $e_r$. |
+| Sender Authentication | Weak; responder cannot authenticate initiator identity under compromise of $s_r$. | Strong mutual authentication achieved by the initiator upon verifying Message 2. | Injective agreement on transcript and identity achieved for both parties. |
+| KCI Resistance | Asymmetric; initiator is immune to KCI, but responder is vulnerable. | Strong KCI resistance for both peers against future impersonation. | Complete resistance to key compromise impersonation. |
+| Anti-Replay Protection | Vulnerable; lacks responder freshness, allowing replay of initiation packets. | Fresh; responder's ephemeral $E_r$ ensures uniqueness of the response flight. | Sequence-number-based anti-replay window enforced over transport. |
+
+The formal models reveal an asymmetric vulnerability to Key Compromise Impersonation (KCI) during the opening flight. KCI occurs when an adversary, possessing the long-term private key of an honest entity, impersonates other legitimate peers to that compromised entity.
+
+If the initiator's static private key $s_i$ is compromised, the adversary cannot impersonate the responder $S_r$ to that initiator. When the honest initiator executes Message 1, it samples a private ephemeral scalar $e_i$. To complete the exchange and decrypt the payload of Message 2, the adversary must derive $SS_{es} = \text{X25519}(e_i, S_r)$. Because $s_r$ remains secure, computing this Diffie-Hellman value requires solving the Computational Diffie-Hellman (CDH) problem over Curve25519.
+
+Conversely, if the responder's static private key $s_r$ is compromised, an active adversary can impersonate any arbitrary initiator $S_k$ to the responder during Message 1. The adversary chooses a synthetic ephemeral keypair $(e_a, E_a)$ and computes:
+
+$$SS_{es} = \text{X25519}(e_a, S_r) = \text{X25519}(s_r, E_a)$$
+
+$$SS_{ss} = \text{X25519}(s_k, S_r) = \text{X25519}(s_r, S_k)$$
+
+Because both inputs to the key derivation function ($SS_{es}$ and $SS_{ss}$) can be computed using the responder's leaked key $s_r$ alone, the adversary can encrypt $S_k$, generate valid authentication tags, and embed arbitrary payloads. The responder unpacks these values and incorrectly concludes that it is interacting with peer $S_k$. The responder cannot confirm the initiator's authenticity from Message 1 alone. Formal mutual authentication from the responder's perspective is deferred until the initiator demonstrates possession of $e_i$ by returning a verified cryptographic confirmation derived from $SS_{ee}$ and $SS_{se}$.
+
+Furthermore, symbolic analysis highlights that Message 1 in raw Noise_IK lacks replay protection. Because the responder contributes no entropy prior to Message 1, an eavesdropper can capture Message 1 and replay it. The responder will derive identical intermediate values for $SS_{es}$ and $SS_{ss}$, allocate state, and transmit a fresh Message 2. To achieve end-to-end security, implementations must supplement Noise_IK with external freshness indicators, such as monotonic timestamps or cookie challenges.
+
+---
+
+## 2. Jason Donenfeld’s WireGuard: Formal Proofs and the 1-RTT Diffie-Hellman Model
+
+WireGuard adapts the Noise framework to kernel-space network tunneling by instantiating the Noise_IKpsk2 handshake pattern. This modification mixes a 256-bit pre-shared symmetric key $Q$ into the chaining key during the construction of Message 2, providing a layer of post-quantum protection against retroactive decryption.
+
+WireGuard also introduces two practical mechanisms outside the baseline Noise specification: an authenticated 12-byte TAI64N timestamp in Message 1 to prevent handshake replays, and a dual-MAC structure (using mac1 and mac2 fields) providing stateless cookie challenges to mitigate denial-of-service (DoS) amplification attacks.
+
+### Tamarin Symbolic Model and Verified Lemmas
+
+Donenfeld and Milner modeled WireGuard in the Tamarin Prover using multiset rewriting rules to represent protocol execution across unbounded concurrent traces. Tamarin evaluates state reachability and trace formulas expressing protocol lemmas in first-order logic. The model verifies security properties via contrapositive formulation, proving that a property holds unless the adversary has compromised specific underlying keys.
+
+The primary agreement properties are formalized through three core lemmas:
+
+#### Lemma 1 (Initiator Key Agreement):
+```tamarin
+All Si, Sr, Ei, Er, Q, C, t1.
+  IKeys(Si, Sr, Ei, Er, Q, C) @ t1 &
+  not (Ex t2. RKeys(Si, Sr, Ei, Er, Q, C) @ t2 & t2 < t1)
+  ==>
+  ( (Ex t2. Reveal(Sr) @ t2 & t2 < t1) |
+    (Ex t2 t3. Reveal(Si) @ t2 & Reveal(Ei) @ t3 & t2 < t1 & t3 < t1)
+  ) &
+  (Ex t2. Reveal(Q) @ t2 & t2 < t1)
+```
+
+Lemma 1 establishes that from the initiator’s perspective, a failure to reach agreement on session key $C$ requires prior compromise of the responder’s static key $S_r$, or simultaneous compromise of the initiator’s static key $S_i$ and ephemeral key $E_i$, alongside the pre-shared key $Q$.
+
+#### Lemma 2 (Responder Key Confirmation):
+```tamarin
+All Si, Sr, Ei, Er, Q, C, t1.
+  RConfirm(Si, Sr, Ei, Er, Q, C) @ t1 &
+  not (Ex t2. IKeys(Si, Sr, Ei, Er, Q, C) @ t2 & t2 < t1)
+  ==>
+  ( (Ex t2. Reveal(Si) @ t2 & t2 < t1) |
+    (Ex t2 t3. Reveal(Sr) @ t2 & Reveal(Er) @ t3 & t2 < t1 & t3 < t1)
+  ) &
+  (Ex t2. Reveal(Q) @ t2 & t2 < t1)
+```
+
+Lemma 2 models the responder's perspective, asserting that session disagreement after receiving the first transport data packet (RConfirm) implies that the adversary compromised either the initiator's static key $S_i$, or both the responder's static key $S_r$ and ephemeral key $E_r$, in addition to the pre-shared key $Q$.
+
+#### Lemma 3 (Session Key Agreement / UKS Resistance):
+```tamarin
+All Si, S'i, Sr, S'r, Ei, E'i, Er, E'r, Q, Q', C, t1, t2.
+  IKeys(Si, Sr, Ei, Er, Q, C) @ t1 &
+  RKeys(S'i, S'r, E'i, E'r, Q', C) @ t2
+  ==>
+  Si = S'i & Sr = S'r & Ei = E'i & Er = E'r & Q = Q'
+```
+
+Lemma 3 proves Unknown Key-Share (UKS) resistance: if an initiator and a responder derive the same session key $C$, they must agree identically on the static public keys, ephemeral public keys, and the pre-shared key.
+
+Secrecy, session uniqueness, and identity hiding are established through additional lemmas:
+
+#### Lemma 4 (Session Key Secrecy):
+```tamarin
+All Si, Sr, Ei, Er, Q, C, t1, t2.
+  IKeys(Si, Sr, Ei, Er, Q, C) @ t1 &
+  RKeys(Si, Sr, Ei, Er, Q, C) @ t2
+  ==>
+  not (Ex t3. K(C) @ t3) |
+  ( (Ex t3. Reveal(Q) @ t3) &
+    ( (Ex t3 t4. Reveal(Sr) @ t3 & Reveal(Er) @ t4) |
+      (Ex t3 t4. Reveal(Si) @ t3 & Reveal(Ei) @ t4) )
+  )
+```
+
+#### Lemma 5 (Initiator Session Uniqueness):
+```tamarin
+All Si, Sr, Ei, Er, Q, C, t1.
+  IKeys(Si, Sr, Ei, Er, Q, C) @ t1
+  ==>
+  not (Ex E'i E'r Q' t2. IKeys(Si, Sr, E'i, E'r, Q', C) @ t2 & not (#t1 = #t2))
+```
+
+#### Lemma 6 (Responder Session Uniqueness):
+```tamarin
+All Si, Sr, Ei, Er, Q, C, t1.
+  RConfirm(Si, Sr, Ei, Er, Q, C) @ t1
+  ==>
+  not (Ex E'i E'r Q' t2. RConfirm(Si, Sr, E'i, E'r, Q', C) @ t2 & not (#t1 = #t2))
+```
+
+#### Lemma 7 (Initiator Identity Hiding):
+```tamarin
+All sigma, Si, Sr, Ei, Er, Q, C, t1.
+  RKeys(Si, Sr, Ei, Er, Q, C) @ t1 & sigma @ t1
+  ==>
+  (Ex t2. Reveal(Sr) @ t2) |
+  (Ex t2. Reveal(Si) @ t2) |
+  (Ex t2. Reveal(Ei) @ t2)
+```
+
+Lemma 4 states that once key agreement is reached, an adversary can learn the derived session key $C$ only if the pre-shared key $Q$ and both the static and ephemeral keys of at least one participant are exposed.
+
+Lemmas 5 and 6 demonstrate replay resistance and freshness by showing that an entity cannot derive the same session key $C$ across distinct sessions.
+
+Lemma 7 verifies identity protection: substituting a surrogate nonce $\sigma$ for the initiator's static public key $S_i$ demonstrates that an active observer cannot deduce the initiator's identity without compromising $S_r$, $S_i$, or $E_i$.
+
+### Computational Critiques: The 1.5-RTT Boundary and the Key Indistinguishability Proof Barrier
+
+Dowling and Paterson analyzed WireGuard under the extended Canetti-Krawczyk model incorporating Perfect Forward Secrecy and Pre-Shared Keys ($eCK\text{-}PFS\text{-}PSK$). Their analysis identified a structural gap between WireGuard’s operational claims and standard modular reduction proofs.
+
+WireGuard positions its key exchange as a 1-RTT protocol: the initiator transmits the handshake initiation, the responder returns the handshake response, and transport data begins flowing immediately.
+
+However, because the responder remains vulnerable to KCI on Message 1, it cannot safely authenticate the initiator upon receiving that first flight. The responder can only consider the session authenticated after decrypting the first transport data packet (or an empty keepalive) sent by the initiator.
+
+This transport packet provides key confirmation, meaning that WireGuard functions operationally as a 1.5-RTT protocol for the responder.
+
+```text
+WireGuard Operational Round-Trip Exchange:
+  Initiator                                Responder
+      |                                        |
+      | -------- Handshake Initiation -------> |  [Msg 1: Responder cannot authenticate initiator; KCI vulnerable]
+      |                                        |
+      | <------- Handshake Response ---------- |  [Msg 2: 1-RTT complete; Initiator authenticates responder]
+      |                                        |
+      | === First Transport Data Packet =====> |  [Key Confirmation: 1.5-RTT; Responder authenticates initiator]
+      |                                        |
+      | <====== Bidirectional Data Flow =====> |  [Both peers communicate securely]
+```
+
+This dependency creates a proof barrier in reductionist cryptography. Standard security models require an AKE protocol to demonstrate Key Indistinguishability (KI), proving that the derived session keys are computationally indistinguishable from uniform random bitstrings. This property allows the key exchange to be safely composed with arbitrary higher-layer symmetric applications.
+
+In WireGuard, the derived transport key $tk_{init}$ is immediately consumed to encrypt and authenticate the first data packet. Because this key confirmation ciphertext is computed using the session key itself, the standard KI distinguishing game breaks down. An adversary can query the test oracle on the session key and trivially distinguish the real key from a random bitstring by attempting to verify the authentication tag on the first transport packet.
+
+To resolve this within a modular framework, Dowling and Paterson proposed adding an explicit third handshake confirmation message to the protocol, establishing key separation before transport key usage and proving the protocol secure under the PRF-ODH assumption.
+
+In contrast, Lipp et al. addressed the proof barrier without protocol modifications by evaluating WireGuard using CryptoVerif. They modeled the handshake and transport phases as a unified primitive within an Authenticated and Confidential Channel Establishment (ACCE) framework.
+
+Their mechanized proof verified WireGuard’s properties—including message secrecy, forward secrecy, and mutual authentication—while formally accounting for the lack of public key validation on Curve25519 (small-subgroup confinement) by showing that continuous HKDF hashing neutralizes non-contributing group elements.
+
+| Analysis Parameter | Donenfeld & Milner (2017) | Dowling & Paterson (2018) | Lipp et al. (2019) |
+| :--- | :--- | :--- | :--- |
+| Verification Tool | Tamarin Prover (Symbolic). | Manual reductionist proof (Computational). | CryptoVerif (Mechanized Computational). |
+| Security Model | Dolev-Yao trace-based multiset rewriting. | Game-based $eCK\text{-}PFS\text{-}PSK$ model. | Computational ACCE model. |
+| Protocol Scope | Handshake plus key confirmation rule. | Handshake isolated (with proposed third message). | Monolithic: complete handshake and transport layer. |
+| Curve25519 Subgroups | Abstracted via DH equational theory. | Assumed prime-order group. | Explicit model of small-subgroup validation absence. |
+| Round-Trip Model | Abstracted as 1-RTT with confirmation. | Explicitly formalized as 1.5-RTT. | Formalized as ACCE channel with deferred confirmation. |
+
+---
+
+## 3. Mathematical Analysis of Anti-Replay Bitmask Sliding Windows: RFC 4303 versus RFC 6479
+
+Protocols running over packet-switched networks must defend against packet duplication and re-injection attacks. In IPsec Encapsulating Security Payload (ESP; RFC 4303) and WireGuard, this is handled by combining cryptographic authentication with a sliding-window sequence filter.
+
+Each packet carries an incrementing 64-bit sequence counter $S$. The receiver maintains a window of accepted sequence numbers to identify duplicates and handle out-of-order arrivals.
+
+### The RFC 4303 Shifting Window Model
+
+RFC 4303 specifies an anti-replay window defined over the closed interval:
+
+$$[W_B, W_T], \quad \text{where } W_B = W_T - W + 1$$
+
+Here, $W_T$ represents the highest sequence number authenticated so far, $W_B$ is the lower window boundary, and $W$ is the window width in packets. The window state is tracked using a linear bitmask of $W$ bits.
+
+```text
+RFC 4303 Linear Bitmask Representation:
+  Low-order boundary                              High-order boundary
+  WB = (WT - W + 1)                               WT (Last validated)
+  |--------------------------- Window W ---------------------------|
+  [Bit 0] [Bit 1] [Bit 2] ...                   ... [Bit W-2] [Bit W-1]
+  Packets with S < WB: Dropped unconditionally (stale).
+  Packets in [WB, WT]: Checked against bitmask (replayed vs fresh).
+  Packets with S > WT: Window slides rightward by Delta = S - WT bits.
+```
+
+When an authentic packet arrives with sequence number $S > W_T$, the window must slide rightward by an offset $\Delta = S - W_T$. In traditional RFC 4303 implementations, advancing the window requires an explicit left-shift of the multi-word memory array storing the bitmask:
+
+$$\text{Bitmask} \leftarrow \text{Bitmask} \ll \Delta$$
+
+Bits shifted out past the left boundary ($< W_B$) are discarded, while new positions opened on the right are cleared to zero.
+
+For small window sizes ($W = 64$ bits), this operation executes in a single CPU instruction using a 64-bit machine register. However, modern high-bandwidth connections subject to significant packet reordering require larger windows, such as $W = 1024$ bits.
+
+Shifting a 1024-bit bitmask across multiple 32-bit or 64-bit words on every advancing packet incurs substantial CPU overhead, memory-bus locks, and cache line invalidations on high-speed network interfaces.
+
+### The RFC 6479 Circular Ring Window
+
+RFC 6479 resolves the computational overhead of wide-window shifting by mapping the bitmask onto a circular ring buffer of memory blocks, eliminating multi-word bit shifting entirely.
+
+The implementation allocates a circular array of $M$ blocks, where each block contains $N$ bits. Both $M$ and $N$ are constrained to powers of two:
+
+$$M = 2^m, \quad N = 2^k$$
+
+The total span of the buffer is $M \times N$ bits, providing an effective sliding window width of:
+
+$$W_{eff} = (M - 1) \times N$$
+
+The remaining block functions as a redundant buffer that prevents ambiguous boundary wrapping during window advancements.
+
+```text
+RFC 6479 Direct Sequence-to-Ring Mapping:
+  Sequence Number S (Unsigned 64-bit Integer):
+  +-----------------------------+-----------------------+--------------------+
+  |      Unused High Bits       |  Block Index Bits (m) | Bit Offset Bits (k)|
+  +-----------------------------+-----------------------+--------------------+
+                                            |                     |
+                                            v                     v
+                                    Circular Ring Index     Bitmask Offset
+                                       I(S) in [0, M-1]      beta in [0, N-1]
+```
+
+Given an incoming sequence counter $S$, its location within the circular structure is calculated via bitwise masking:
+
+$$\text{Bit Location: } \beta = S \pmod N = S \ \& \ (N - 1)$$
+
+$$\text{Absolute Block Counter: } B(S) = \lfloor S / N \rfloor = S \gg k$$
+
+$$\text{Circular Ring Index: } I(S) = B(S) \pmod M = (S \gg k) \ \& \ (M - 1)$$
+
+For a window size $W = 1024$ on a 32-bit architecture, RFC 6479 configures $N = 32$ bits ($k = 5$) and $M = 32$ words ($m = 5$), defining $\text{BITMAP\_INDEX\_MASK} = 31$ and $\text{BITMAP\_LOC\_MASK} = 31$.
+
+In the WireGuard Go implementation (`replay.go`), the algorithm scales to 64-bit architectures using $N = 64$ bits ($k = 6$) and $M = 128$ blocks ($m = 7$), providing an effective window $W_{eff} = (128 - 1) \times 64 = 8128$ bits.
+
+The algorithm splits processing into a check phase and an update phase, maintaining state isolation until cryptographic authenticity is verified.
+
+#### Check Phase (`ipsec_check_replay_window`)
+
+Before expending computational resources on AEAD decryption, the sequence counter $S$ is evaluated against the current state $(W_T, W_{eff})$:
+
+If $S > W_T$, the packet represents a fresh, advancing sequence number; the check succeeds immediately.
+
+If $S \le W_T$ and $(W_T - S) \ge W_{eff}$, the packet falls behind the lower window boundary; it is rejected as stale.
+
+If $S \le W_T$ and $(W_T - S) < W_{eff}$, the sequence falls within the active window. The receiver inspects the target bit:
+
+$$\text{BitState} = \text{Ring}[I(S)] \ \& \ (1 \ll \beta)$$
+
+If $\text{BitState} \neq 0$, the packet is a duplicate and is rejected. If $\text{BitState} == 0$, the packet is accepted for cryptographic verification.
+
+#### Update Phase (`ipsec_update_replay_window`)
+
+Once the packet’s AEAD integrity tag is authenticated, the window state is updated:
+
+If $S > W_T$, the window advances. The block traversal distance is calculated:
+
+$$\Delta_B = B(S) - B(W_T) = (S \gg k) - (W_T \gg k)$$
+
+If $\Delta_B > M$, the sequence advancement exceeds the entire ring buffer; the traversal count is clamped to $M$.
+
+The receiver iterates through the newly cleared blocks, setting $\text{Ring}[(B(W_T) + step) \ \& \ (M - 1)] = 0$ for each passed block, and updates $W_T = S$.
+
+The sequence bit is then committed by setting $\text{Ring}[I(S)] \leftarrow \text{Ring}[I(S)] \mid (1 \ll \beta)$.
+
+Because block clearing occurs only when a sequence counter crosses a block boundary ($\Delta_B \ge 1$), advancing the window avoids continuous bit shifts.
+
+For sequential packet arrival patterns, clearing occurs once every $N$ packets, yielding an amortized complexity of $O(1)$ operations per packet and reducing memory writes by a factor of $1/N$ relative to RFC 4303.
+
+| Metric / Parameter | RFC 4303 Bit-Shift Architecture | RFC 6479 Standard Profile | WireGuard replay.go Implementation |
+| :--- | :--- | :--- | :--- |
+| Word Size ($N$) | 32 bits ($k = 5$) or 64 bits ($k = 6$). | 32 bits ($k = 5$). | 64 bits ($k = 6$). |
+| Block Array Length ($M$) | $\lceil W / N \rceil$ (e.g., 16 words for $W=1024$). | 32 words ($m = 5$). | 128 words ($m = 7$). |
+| Supported Window Size ($W$) | $1024$ bits (rigid). | $(M-1) \times N = 992$ bits. | $(M-1) \times N = 8128$ bits. |
+| Total Memory Allocation | 128 bytes ($1024$ bits). | 128 bytes ($1024$ bits total ring). | 1024 bytes ($8192$ bits total ring). |
+| Advancing Shift Cost | $O(W / \text{word\_size})$ memory writes. | $O(1)$ amortized ($1/N$ block clearing). | $O(1)$ amortized with capped loop. |
+| Concurrent Synchronization | Critical section spans entire multi-word shift. | Word-level CAS or lightweight spinlocks. | Unsynchronized filter; pinned to worker. |
+
+---
+
+## 4. Cross-Layer Dynamics of Anti-Replay Windows over WebSocket Relays
+
+Tunneling datagrams through application-layer WebSocket relays (RFC 6455) alters the underlying network behavior, replacing the unordered datagram delivery of UDP with the reliable, in-order byte stream of TCP. This transport transition affects the assumptions underlying anti-replay sliding windows.
+
+```text
+Layered Protocol Framing:
+  [ TCP Header ] [ TLS Record Header ] [ WebSocket Frame ] [ WireGuard Header: Counter S ] [ AEAD Payload + Poly1305 Tag ]
+```
+
+### Single-Stream WebSocket Behavior: Monotonic Collapse and Head-of-Line Blocking
+
+When a secure tunnel encapsulates packets over a single continuous WebSocket stream, TCP guarantees that datagrams arrive at the receiving application layer in the exact sequence they were transmitted.
+
+Under these conditions, every arriving packet carries a sequence number satisfying $S_{current} = W_T + 1$.
+
+Because packet reordering is entirely resolved by the underlying TCP stack, the anti-replay window operates exclusively on its rightmost boundary. The bitmask verification branch ($S \le W_T$) is never exercised.
+
+The sliding window effectively collapses into a simple monotonic counter check.
+
+However, this abstraction introduces operational side effects through TCP Head-of-Line (HoL) blocking. If a single TCP segment is dropped on the physical link, the receiver's kernel halts data delivery to the WebSocket server until the missing segment is retransmitted and acknowledged.
+
+Subsequent WebSocket frames accumulate in the kernel socket receive buffer. Once the lost segment is recovered, the queued frames are released to the application layer in a burst.
+
+While this maintains strict monotonic sequence delivery to the RFC 6479 filter, the burst creates packet latency variance (jitter).
+
+When inner tunnels carry nested TCP connections, this queuing delay can cause inner retransmission timeouts (RTOs) to expire, triggering spurious retransmissions that degrade end-to-end throughput.
+
+### Multi-Stream and Parallel WebSocket Relays: Out-of-Order Horizons
+
+To bypass single-stream throughput limitations and mitigate Head-of-Line blocking, advanced proxy architectures stripe datagram traffic across multiple parallel WebSocket connections.
+
+Distributing packets across parallel TCP streams reintroduces sequence reordering at the receiver.
+
+```text
+Parallel Multiplexing over Divergent TCP Paths:
+  Transmitter ----> [ Round-Robin Dispatcher ] ===> WebSocket Stream 1 (Latency tau_1) ===> [ Merging Buffer ] ----> Anti-Replay Filter
+                                               ===> WebSocket Stream 2 (Latency tau_2) ===>                  (Window W = 1024)
+```
+
+Let a sender transmit packets across two parallel WebSocket streams with differing network round-trip latencies, $\tau_1$ and $\tau_2$, where $\Delta \tau = \vert{}\tau_1 - \tau_2\vert{}$.
+
+Given a packet transmission rate of $R$ packets per second, the sequence divergence between the two paths at the receiver is:
+
+$$\Delta S \approx R \times \Delta \tau$$
+
+If an intermediate loss event causes Stream 1 to enter TCP retransmission while Stream 2 continues delivering packets uninterrupted, the receiver's highest authenticated sequence number $W_T$ advances based on Stream 2's traffic.
+
+When Stream 1 finally recovers and delivers its stalled burst, the oldest packet in that batch carries a sequence number $S_{delayed}$. The receiver evaluates this sequence against the updated window state:
+
+$$\text{Replay Drop Condition: } W_T - S_{delayed} \ge W_{eff}$$
+
+For a standard window size $W_{eff} = 1024$ and a transmission rate of $R = 100,000 \text{ pps}$ (representing a high-throughput 1 Gbps link), the maximum allowable differential latency before packet drop occurs is:
+
+$$\Delta t_{drop} = \frac{W_{eff}}{R} = \frac{1024}{100000} = 10.24 \text{ milliseconds}$$
+
+If Stream 1 experiences a latency transient or retransmission delay exceeding $10.24 \text{ ms}$, its packets will arrive behind the lower window boundary ($S_{delayed} < W_B$).
+
+The RFC 6479 filter drops these authentic, reordered packets as suspected replays. This causes artificial packet loss, which degrades the performance of tunneled transport flows.
+
+To prevent this in high-bandwidth parallel-relay environments, the window size must be expanded to satisfy:
+
+$$W > R \times \Delta \tau_{max}$$
+
+This operational requirement explains why WireGuard's implementation scales its sliding window to $W_{eff} = 8128$ bits, which accommodates substantial path divergence without sacrificing performance.
+
+### Nonce Reuse Prevention, DoS Mitigation, and Active Injection
+
+The ChaCha20-Poly1305 AEAD primitive requires that a nonce must never be repeated under the same key. Poly1305 authenticates messages by evaluating a polynomial over the Galois field $\text{GF}(2^{130}-5)$ using a secret evaluation point $r$ and an additive mask $s$.
+
+If two distinct ciphertexts are produced using the same nonce and symmetric key, an attacker can subtract the authenticators to eliminate $s$, solve for the evaluation key $r$, and forge authentication tags for arbitrary payloads.
+
+In WireGuard and Noise-based architectures, the 64-bit sequence counter $S$ maps directly to the 96-bit AEAD nonce:
+
+$$\text{Nonce} = 0x0000000000000000 \parallel S_{64}$$
+
+This construction directly couples the anti-replay mechanism to cryptographic authenticity.
+
+```text
+Integrated Packet Verification Pipeline:
+  Step 1: Check Sequence (RFC 6479 Filter)
+          [S <= WT and Duplicate] or [WT - S >= W]  ===> Drop packet immediately (Zero crypto cost)
+          Otherwise                                 ===> Proceed to Step 2
+  Step 2: Cryptographic Authentication
+          ChaCha20-Poly1305 Tag Verification        ===> Tag Mismatch: Drop packet, revert state
+          Otherwise                                 ===> Tag Valid: Proceed to Step 3
+  Step 3: Commit State
+          Advance WT (if S > WT) and Set Bitmask    ===> Deliver cleartext packet to OS networking stack
+```
+
+In this pipeline, the anti-replay window serves as an initial defensive filter against denial-of-service (DoS) attacks.
+
+If an attacker injects replayed packets into a WebSocket stream, the RFC 6479 filter identifies the duplicate sequence numbers and drops the packets during the check phase, before invoking the AEAD decryption engine.
+
+This prevents replayed traffic from consuming CPU cycles on Poly1305 authentications.
+
+Conversely, separating the check phase from the commit phase prevents state pollution. If an adversary alters the sequence counter in an intercepted frame to pass the check filter, the subsequent Poly1305 verification fails.
+
+Because the bitmask and $W_T$ are updated strictly after successful cryptographic verification, invalid packets cannot advance the window or corrupt the receiver's state.
+
+| Threat / Network Vector | Single WebSocket Stream | Multiplexed WebSocket Stream | Replay Filter Architectural Role |
+| :--- | :--- | :--- | :--- |
+| Adversarial Frame Replay | Blocked; replayed frames are rejected during check phase. | Blocked; replayed frames are rejected during check phase. | Prevents Poly1305 verification load and cryptographic nonce reuse. |
+| Adversarial Frame Modification | Blocked; fails Poly1305 AEAD integrity check. | Blocked; fails Poly1305 AEAD integrity check. | Decoupled state commit ensures unauthenticated frames do not alter the window. |
+| Window Starvation via Injection | Prevented; forged sequence numbers fail authentication. | Prevented; forged sequence numbers fail authentication. | Unauthenticated packets cannot advance $W_T$ or invalidate in-flight packets. |
+| Transport Head-of-Line Delay | Present; TCP packet recovery delays all subsequent frames. | Mitigated across independent TCP streams. | Filter handles resulting packet bursts without state degradation. |
+| Out-of-Order Arrival Spurious Drops | None; TCP guarantees strict monotonic delivery. | Risk of spurious drops if $\Delta S \ge W_{eff}$. | Window width $W$ must be sized to accommodate cross-stream path latency deltas. |
+
+---
+
+## 5. Synthesis of Verification Models and Implementation Realities
+
+The verification of modern authenticated key exchange protocols reveals the operational trade-offs that emerge when mapping theoretical security proofs to low-level implementations and non-native transports.
+
+Symbolic provers like ProVerif and Tamarin are effective at verifying structural trace properties, path reachability, and algebraic identities in the Dolev-Yao model. Donenfeld and Milner used Tamarin to formally prove mutual authentication, session uniqueness, and identity hiding for WireGuard under unbounded sessions.
+
+However, symbolic models operate under perfect-cryptography abstractions: they model Diffie-Hellman operations through abstract equational theories that omit lower-level details such as small-subgroup validation, timing channels, and the security implications of early transport key usage.
+
+Computational analyses identify the operational boundaries of these abstractions. Dowling and Paterson's analysis demonstrated that WireGuard's 1-RTT handshake does not satisfy standard reductionist definitions of Key Indistinguishability when evaluated in isolation, because the session key is immediately consumed to provide key confirmation.
+
+This established that WireGuard operates as a 1.5-RTT protocol for the responder, requiring monolithic models (such as Lipp et al.'s ACCE verification in CryptoVerif) to evaluate the handshake and data transport phases as an integrated primitive.
+
+At the transport layer, anti-replay algorithms must balance cryptographic guarantees with the realities of packet delivery.
+
+The circular bitmask architecture of RFC 6479 eliminates the bit-shifting overhead of RFC 4303, enabling implementations to deploy wide windows ($W \ge 1024$ bits) with minimal CPU cost.
+
+When these protocols are tunneled through WebSocket relays, transport impedance mismatches emerge. Single-stream WebSocket tunnels render multi-word sliding windows functionally redundant while exposing connections to Head-of-Line blocking.
+
+Multiplexed parallel WebSocket relays mitigate this blocking, but reintroduce packet reordering that can lead to spurious packet drops if the window width $W$ is smaller than the bandwidth-delay product of the parallel network paths.
+
+Across these layers, protocol correctness relies on strict state separation: decoupling the replay check from the cryptographic commit preserves state integrity, prevents DoS amplification, and guarantees that sliding-window filters protect AEAD primitives from nonce reuse under all operating conditions.

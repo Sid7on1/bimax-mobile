@@ -1,0 +1,25 @@
+{
+  "name": "bimax-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^9.22.0",
+    "eslint-config-expo": "~9.2.0",
+    "prettier": "^3.5.3",
+    "typescript": "~5.8.3"
+  },
+  "overrides": {
+    "expo-router": {
+      "expo-constants": "$expo-constants",
+      "expo-linking": "$expo-linking"
+    }
+  }
+}
