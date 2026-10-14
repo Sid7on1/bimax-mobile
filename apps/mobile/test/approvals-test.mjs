@@ -47,6 +47,8 @@ async function main() {
     buildApprovalDecision,
     signApprovalDecision,
     verifyApprovalDecision,
+    verifyDecisionBinding,
+    approvalRequestHash,
     decideWithBiometric,
   } = require(path.join(distDir, "approvals", "approvals.js"));
 
@@ -359,6 +361,166 @@ async function main() {
       verifyApprovalDecision(signedDecisionResult, edKeypair.publicKey),
       true,
       "decision signed via biometric gate must be verifiable",
+    );
+
+    console.log("  PASS");
+  } catch (err) {
+    console.error("  FAIL:", err);
+    process.exit(1);
+  }
+
+  // ==========================================
+  // STEP 5 (async onDecision propagation & ordering)
+  // ==========================================
+  console.log("STEP 5 (async onDecision propagation & ordering):");
+  try {
+    const fakeReq = {
+      approvalId: "appr-bio-async-1",
+      sessionId: "sess-bio-async-1",
+      tool: "terminal_exec",
+      summary: "Restart server",
+      detail: "pm2 restart app",
+      requestedAt: Date.now(),
+      expiresAt: Date.now() + 60000,
+    };
+    const edKeypair = generateEd25519Keypair();
+
+    // 1. decideWithBiometric with an async onDecision that throws must produce a rejected promise
+    let thrownError = null;
+    try {
+      await decideWithBiometric({
+        requestBiometric: async () => true,
+        build: () => buildApprovalDecision(fakeReq, "approved"),
+        sign: (unsigned) => signApprovalDecision(unsigned, edKeypair.privateKey),
+        onDecision: async () => {
+          throw new Error("sendEncrypted failed: peer unreachable");
+        },
+        onDenied: () => {},
+      });
+    } catch (err) {
+      thrownError = err;
+    }
+
+    assert.ok(thrownError, "decideWithBiometric must reject when async onDecision throws");
+    assert.strictEqual(
+      thrownError.message,
+      "sendEncrypted failed: peer unreachable",
+      "error message must propagate from async onDecision",
+    );
+
+    // 2. decideWithBiometric with an async onDecision that resolves:
+    // the promise must resolve only after onDecision completes (assert ordering with a flag)
+    let onDecisionCompleted = false;
+    let decideFinished = false;
+
+    const decidePromise = decideWithBiometric({
+      requestBiometric: async () => true,
+      build: () => buildApprovalDecision(fakeReq, "approved"),
+      sign: (unsigned) => signApprovalDecision(unsigned, edKeypair.privateKey),
+      onDecision: async () => {
+        await new Promise((r) => setTimeout(r, 50));
+        assert.strictEqual(decideFinished, false, "decideWithBiometric must NOT have resolved yet");
+        onDecisionCompleted = true;
+      },
+      onDenied: () => {},
+    }).then(() => {
+      decideFinished = true;
+    });
+
+    assert.strictEqual(onDecisionCompleted, false, "onDecision has not finished synchronously");
+    assert.strictEqual(decideFinished, false, "decideWithBiometric has not finished synchronously");
+
+    await decidePromise;
+
+    assert.strictEqual(
+      onDecisionCompleted,
+      true,
+      "onDecision must have completed before decideWithBiometric resolved",
+    );
+    assert.strictEqual(decideFinished, true, "decideWithBiometric resolved successfully");
+
+    console.log("  PASS");
+  } catch (err) {
+    console.error("  FAIL:", err);
+    process.exit(1);
+  }
+
+  // ==========================================
+  // STEP 6 (request binding — protocol v1.6)
+  // ==========================================
+  console.log("STEP 6 (request binding):");
+  try {
+    const now = Date.now();
+    const reqA = {
+      approvalId: "appr-bind-1",
+      sessionId: "sess-bind-1",
+      tool: "bash",
+      summary: "Run npm test",
+      detail: "npm test -- --coverage",
+      requestedAt: now,
+      expiresAt: now + 60000,
+    };
+    // Same IDs, DIFFERENT command — the swap attack.
+    const reqB = {
+      ...reqA,
+      summary: "Clean temp files",
+      detail: "rm -rf /tmp/*",
+    };
+
+    const edKeypair = generateEd25519Keypair();
+    const unsigned = buildApprovalDecision(reqA, "approve");
+    assert.ok(
+      typeof unsigned.requestHash === "string" && unsigned.requestHash.length > 0,
+      "buildApprovalDecision must set a non-empty requestHash",
+    );
+    const signed = signApprovalDecision(unsigned, edKeypair.privateKey);
+
+    assert.strictEqual(
+      verifyApprovalDecision(signed, edKeypair.publicKey),
+      true,
+      "signed v1.6 decision must verify",
+    );
+    assert.strictEqual(
+      verifyDecisionBinding(signed, reqA),
+      true,
+      "binding must hold for the exact request the user saw",
+    );
+    assert.strictEqual(
+      verifyDecisionBinding(signed, reqB),
+      false,
+      "binding must FAIL for a swapped request with the same approvalId",
+    );
+
+    // Canonicalization: key order must not change the hash.
+    const reqAShuffled = {
+      detail: reqA.detail,
+      tool: reqA.tool,
+      expiresAt: reqA.expiresAt,
+      summary: reqA.summary,
+      approvalId: reqA.approvalId,
+      requestedAt: reqA.requestedAt,
+      sessionId: reqA.sessionId,
+    };
+    assert.strictEqual(
+      approvalRequestHash(reqAShuffled),
+      approvalRequestHash(reqA),
+      "hash must be stable regardless of key order",
+    );
+
+    // Swapping the hash breaks the signature.
+    const hashSwapped = { ...signed, requestHash: approvalRequestHash(reqB) };
+    assert.strictEqual(
+      verifyApprovalDecision(hashSwapped, edKeypair.publicKey),
+      false,
+      "a decision with a swapped requestHash must fail signature verification",
+    );
+
+    // Malformed inputs return false, never throw.
+    assert.strictEqual(verifyDecisionBinding({}, reqA), false);
+    assert.strictEqual(verifyDecisionBinding(signed, null), false);
+    assert.strictEqual(
+      verifyDecisionBinding({ ...signed, requestHash: "" }, reqA),
+      false,
     );
 
     console.log("  PASS");

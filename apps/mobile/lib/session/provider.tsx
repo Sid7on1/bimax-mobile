@@ -15,7 +15,6 @@ import type {
   PairingAdvertisement,
   PairingRequest,
   PairingGrant,
-  Presence,
   EncryptedPayload,
   AgentStatus,
   AgentSessionInfo,
@@ -69,12 +68,14 @@ export interface CommandLogEntry {
 
 export interface RelayContextValue {
   status: ClientStatus | "idle";
+  trustedDesktop: TrustedDesktop | null;
+  refreshTrustedDesktop: () => Promise<void>;
   sessions: EstablishedSession[];
   getSession: (peerId: string) => EstablishedSession | undefined;
+  dropSession: (peerDeviceId: string) => void;
   pendingApprovals: ToolApprovalRequest[];
   approve: (approvalId: string) => Promise<void>;
   deny: (approvalId: string, reason?: "not_me" | "mistake") => Promise<void>;
-  send: (env: Envelope<MessageKind, unknown>) => void;
   sendEncrypted: (to: string, kind: MessageKind, payload: unknown) => void;
   pairWithDesktop: (advert: PairingAdvertisement) => Promise<EstablishedSession>;
   agentStatus: AgentStatus | null;
@@ -101,10 +102,12 @@ interface UserPairing {
   resolve: (s: EstablishedSession) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  attemptId: number;
 }
 
 export function RelayProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<ClientStatus | "idle">("idle");
+  const [trustedDesktop, setTrustedDesktop] = useState<TrustedDesktop | null>(null);
   const [lastKillAck, setLastKillAck] = useState<KillResult | null>(null);
   const [sessions, setSessions] = useState<EstablishedSession[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<ToolApprovalRequest[]>([]);
@@ -120,12 +123,24 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   const clientRef = useRef<RelayClient | null>(null);
   const clientUrlRef = useRef<string | null>(null);
-  const pairingManagerRef = useRef<PairingManager | null>(null);
   const userPairingsRef = useRef(new Map<string, UserPairing>());
+  const attemptCountersRef = useRef<Map<string, number>>(new Map());
+  const rehandshakePairingRef = useRef<{
+    attemptId: number;
+    manager: PairingManager;
+  } | null>(null);
+  const abandonedManagersRef = useRef<PairingManager[]>([]);
+
+  const getNextAttemptId = useCallback((peerDeviceId: string): number => {
+    const current = attemptCountersRef.current.get(peerDeviceId) ?? 0;
+    const next = current + 1;
+    attemptCountersRef.current.set(peerDeviceId, next);
+    return next;
+  }, []);
+
   const deviceIdRef = useRef<string>("");
   const staticKeypairRef = useRef<{ publicKey: Uint8Array; privateKey: Uint8Array } | null>(null);
   const trustedRef = useRef<TrustedDesktop | null>(null);
-  const presenceByDeviceRef = useRef<Map<string, Presence>>(new Map());
 
   const sessionsRef = useRef<EstablishedSession[]>([]);
   const e2eStateRef = useRef(new Map<string, E2EState>());
@@ -197,36 +212,77 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
       if (env.kind === "pairing_grant") {
         const grantEnv = env as Envelope<"pairing_grant", PairingGrant>;
-        const pending = userPairingsRef.current.get(grantEnv.from);
-        const manager = pending?.manager ?? pairingManagerRef.current;
-        if (!manager) return;
+        const peerId = grantEnv.from;
+
+        // Check if this grant was for a superseded/abandoned attempt; if so, drop silently
+        for (let i = abandonedManagersRef.current.length - 1; i >= 0; i--) {
+          const abandonedMgr = abandonedManagersRef.current[i];
+          if (abandonedMgr.hasPendingPairing(peerId)) {
+            try {
+              abandonedMgr.handleGrant(grantEnv);
+              // Silently drop grants for superseded attempts
+              abandonedManagersRef.current.splice(i, 1);
+              return;
+            } catch {
+              // Not for this abandoned attempt
+            }
+          }
+        }
+
+        const userPending = userPairingsRef.current.get(peerId);
+        const rehandshakePending =
+          rehandshakePairingRef.current &&
+          rehandshakePairingRef.current.manager.hasPendingPairing(peerId)
+            ? rehandshakePairingRef.current
+            : null;
+
+        if (!userPending && !rehandshakePending) {
+          return;
+        }
+
+        // Route only to the pending attempt with the highest attempt id for that device
+        const userAttemptId = userPending?.attemptId ?? -1;
+        const rehandshakeAttemptId = rehandshakePending?.attemptId ?? -1;
+
+        const isUser = userAttemptId >= rehandshakeAttemptId;
+        const manager = isUser
+          ? userPending!.manager
+          : rehandshakePending!.manager;
+
         try {
           const session = manager.handleGrant(grantEnv);
+          // Contract §5: fresh Noise session keys => fresh E2E replay space.
+          // Reset send/recv sequence state for this peer on EVERY new session.
+          e2eStateRef.current.set(peerId, newE2EState());
           setSessions((prev) => {
             const next = [
-              ...prev.filter((s) => s.peerDeviceId !== grantEnv.from),
+              ...prev.filter((s) => s.peerDeviceId !== peerId),
               session,
             ];
             sessionsRef.current = next;
             return next;
           });
-          if (pending) {
-            clearTimeout(pending.timer);
-            userPairingsRef.current.delete(grantEnv.from);
-            pending.resolve(session);
+          if (isUser && userPending) {
+            clearTimeout(userPending.timer);
+            userPairingsRef.current.delete(peerId);
+            userPending.resolve(session);
+          } else if (!isUser) {
+            rehandshakePairingRef.current = null;
           }
         } catch (err) {
           setSessions((prev) => {
-            const next = prev.filter((s) => s.peerDeviceId !== grantEnv.from);
+            const next = prev.filter((s) => s.peerDeviceId !== peerId);
             sessionsRef.current = next;
             return next;
           });
-          if (pending) {
-            clearTimeout(pending.timer);
-            userPairingsRef.current.delete(grantEnv.from);
-            pending.reject(
+          if (isUser && userPending) {
+            clearTimeout(userPending.timer);
+            userPairingsRef.current.delete(peerId);
+            userPending.reject(
               err instanceof Error ? err : new Error("Pairing failed"),
             );
+          } else if (!isUser) {
+            rehandshakePairingRef.current = null;
           }
         }
       } else if (env.kind === "approval_request") {
@@ -236,8 +292,6 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         } catch {
           // ignore duplicate or malformed
         }
-      } else if (env.kind === "presence") {
-        presenceByDeviceRef.current.set(env.from, env.payload as Presence);
       } else if (env.kind === "agent_status") {
         const statusPayload = env.payload as AgentStatus | null | undefined;
         if (
@@ -385,12 +439,6 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     [handleIncoming],
   );
 
-  const send = useCallback((env: Envelope<MessageKind, unknown>) => {
-    if (clientRef.current) {
-      clientRef.current.send(env);
-    }
-  }, []);
-
   const sendEncrypted = useCallback(
     (to: string, kind: MessageKind, payload: unknown): void => {
       if (!clientRef.current) {
@@ -433,6 +481,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     [sessions],
   );
 
+  const dropSession = useCallback((peerDeviceId: string): void => {
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.peerDeviceId !== peerDeviceId);
+      sessionsRef.current = next;
+      return next;
+    });
+  }, []);
+
   const pairWithDesktop = useCallback(
     (advert: PairingAdvertisement): Promise<EstablishedSession> => {
       const keypair = staticKeypairRef.current;
@@ -440,6 +496,31 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       if (!keypair || !deviceId) {
         return Promise.reject(new Error("Device identity not loaded yet"));
       }
+
+      // Precedence rule: user-initiated pairing wins.
+      // (Desktop contract: a desktop MUST only grant the most recent
+      // pairing_request per mobile deviceId; earlier ones are superseded.)
+      if (
+        rehandshakePairingRef.current &&
+        rehandshakePairingRef.current.manager.hasPendingPairing(advert.desktopDeviceId)
+      ) {
+        abandonedManagersRef.current.push(rehandshakePairingRef.current.manager);
+        rehandshakePairingRef.current = null;
+      }
+
+      // If a previous user pairing is in flight for this desktop, abandon it as well
+      const existingUser = userPairingsRef.current.get(advert.desktopDeviceId);
+      if (existingUser) {
+        clearTimeout(existingUser.timer);
+        existingUser.reject(new Error("Superseded by a newer pairing attempt"));
+        abandonedManagersRef.current.push(existingUser.manager);
+        // Bound the abandoned list; entries whose grants never arrive are dropped.
+        while (abandonedManagersRef.current.length > 10) {
+          abandonedManagersRef.current.shift();
+        }
+        userPairingsRef.current.delete(advert.desktopDeviceId);
+      }
+
       const client = connectToRelay(advert.relayUrl);
       const manager = new PairingManager({ deviceId, staticKeypair: keypair });
       let reqEnv: Envelope<"pairing_request", PairingRequest>;
@@ -450,6 +531,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           err instanceof Error ? err : new Error("beginPairing failed"),
         );
       }
+      const attemptId = getNextAttemptId(advert.desktopDeviceId);
       return new Promise<EstablishedSession>((resolve, reject) => {
         const timer = setTimeout(() => {
           userPairingsRef.current.delete(advert.desktopDeviceId);
@@ -459,17 +541,27 @@ export function RelayProvider({ children }: { children: ReactNode }) {
             ),
           );
         }, 60000);
+        // NOTE: trust is established only after the user confirms the
+        // verification codes — pair.tsx calls refreshTrustedDesktop()
+        // after saveTrustedDesktop(). Never set trusted state here.
         userPairingsRef.current.set(advert.desktopDeviceId, {
           manager,
           resolve,
           reject,
           timer,
+          attemptId,
         });
         client.send(reqEnv);
       });
     },
-    [connectToRelay],
+    [connectToRelay, getNextAttemptId],
   );
+
+  const refreshTrustedDesktop = useCallback(async (): Promise<void> => {
+    const trusted = await loadTrustedDesktop();
+    trustedRef.current = trusted;
+    setTrustedDesktop(trusted);
+  }, []);
 
   const requireDesktopId = useCallback((): string => {
     const desktopId = trustedRef.current?.deviceId;
@@ -584,6 +676,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           const privKey = await getEd25519PrivateKey();
           const { signature: _sig, ...unsigned } = dec;
           const signed = signApprovalDecision(unsigned, privKey);
+          // ORDER MATTERS: send first. decideWithBiometric now awaits this
+          // callback, so if the send throws, the error propagates and the
+          // approval stays pending for retry (it is NOT removed below).
           sendEncrypted(desktopId, "approval_decision", signed);
           removeApproval(approvalId);
           setPendingApprovals(getPending());
@@ -649,6 +744,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         const trusted = await loadTrustedDesktop();
         if (!isMounted) return;
         trustedRef.current = trusted;
+        setTrustedDesktop(trusted);
         if (!trusted) {
           statusRef.current = "idle";
           setStatus("idle");
@@ -658,7 +754,6 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           deviceId,
           staticKeypair: staticKeypairRef.current,
         });
-        pairingManagerRef.current = pairingManager;
 
         const candidateUrls: string[] =
           trusted.lanRelayUrl && trusted.lastWorking !== "cloud"
@@ -699,7 +794,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         if (winningUrl && winningClient) {
           const lastWorking: "lan" | "cloud" =
             winningUrl === trusted.lanRelayUrl ? "lan" : "cloud";
-          trustedRef.current = { ...trusted, lastWorking };
+          const updatedTrusted = { ...trusted, lastWorking };
+          trustedRef.current = updatedTrusted;
+          setTrustedDesktop(updatedTrusted);
           try {
             await saveTrustedDesktop({
               deviceId: trusted.deviceId,
@@ -718,6 +815,11 @@ export function RelayProvider({ children }: { children: ReactNode }) {
             desktopDeviceId: trusted.deviceId,
             desktopPublicKey: trusted.staticPublicKeyB64,
             app: "bimax" as const,
+          };
+          const attemptId = getNextAttemptId(trusted.deviceId);
+          rehandshakePairingRef.current = {
+            attemptId,
+            manager: pairingManager,
           };
           const reqEnv = pairingManager.beginPairing(rehandshakeAdvert);
           winningClient.send(reqEnv);
@@ -738,6 +840,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         if (isMounted) {
           statusRef.current = "idle";
           setStatus("idle");
+          setTrustedDesktop(null);
         }
       }
     }
@@ -750,7 +853,6 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         p.reject(new Error("Provider unmounted"));
       }
       userPairings.clear();
-      pairingManagerRef.current = null;
       if (clientRef.current) {
         try {
           clientRef.current.close();
@@ -761,16 +863,18 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       }
       clientUrlRef.current = null;
     };
-  }, [connectToRelay]);
+  }, [connectToRelay, getNextAttemptId]);
 
   const value: RelayContextValue = {
     status,
+    trustedDesktop,
+    refreshTrustedDesktop,
     sessions,
     getSession,
+    dropSession,
     pendingApprovals,
     approve,
     deny,
-    send,
     sendEncrypted,
     pairWithDesktop,
     agentStatus,

@@ -1,0 +1,10 @@
+RATE_LIMIT_CONCURRENCY {"allowed":100,"limit":30,"storedCounter":"1"}
+QUOTA_NO_RESERVATION {"admitted":100,"budget":100,"chargedIfEachUses15Tokens":1500}
+MISSING_ENTITLEMENT {"allowed":true,"tokensUsed":0,"tokenBudget":100,"resetAt":"2026-11-01T00:00:00.000Z","error":"ok"}
+JWT_WRONG_ISSUER_AUDIENCE_MISSING_EXP {"accepted":true,"userId":"audit-user"}
+CRASH_BEFORE_BACKGROUND_PERSIST {"effectExecutions":2}
+IN_FLIGHT_RECORD_AFTER_RESTART {"present":false}
+DROPPED_FRAME_NEXT_DECRYPT authentication failure
+PLAINTEXT_APP_MESSAGE_HANDLERS {"statusAccepted":true,"approvalAccepted":true}
+EMPTY_PROLOGUE_SPEC_INTEROP authentication failure when responder follows required MixHash(empty)
+REAL_RELAY_PAIRING_WITHOUT_OUT_OF_BAND_SIGNING_KEY Missing phone hello pubkey for trust record

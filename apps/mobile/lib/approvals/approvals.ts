@@ -3,7 +3,7 @@ import type {
   ApprovalDecision,
   ApprovalDecisionValue,
 } from "@bimax/protocol";
-import { canonicalJson, ed25519Sign, ed25519Verify } from "../crypto/keys";
+import { canonicalJson, ed25519Sign, ed25519Verify, sha256Bytes } from "../crypto/keys";
 import { bytesToBase64, base64ToBytes } from "../crypto/base64";
 
 const approvalStore = new Map<string, ToolApprovalRequest>();
@@ -48,7 +48,8 @@ export function addApproval(req: ToolApprovalRequest): void {
     throw new Error("addApproval: missing or invalid expiresAt");
   }
 
-  if (approvalStore.has(req.approvalId)) {
+  const existing = approvalStore.get(req.approvalId);
+  if (existing && !isExpired(existing)) {
     throw new Error(`addApproval: duplicate approvalId ${req.approvalId}`);
   }
 
@@ -56,12 +57,15 @@ export function addApproval(req: ToolApprovalRequest): void {
 }
 
 /**
- * Returns all pending approval requests in the store that have not expired.
+ * Returns all pending approval requests in the store that have not expired,
+ * pruning expired entries from the in-memory store.
  */
 export function getPending(): ToolApprovalRequest[] {
   const pending: ToolApprovalRequest[] = [];
-  for (const req of approvalStore.values()) {
-    if (!isExpired(req)) {
+  for (const [id, req] of approvalStore.entries()) {
+    if (isExpired(req)) {
+      approvalStore.delete(id);
+    } else {
       pending.push(req);
     }
   }
@@ -104,6 +108,7 @@ export function buildApprovalDecision(
     sessionId: req.sessionId,
     decision: decisionValue,
     decidedAt: Date.now(),
+    requestHash: approvalRequestHash(req),
   };
 
   if (denyReason) {
@@ -111,6 +116,40 @@ export function buildApprovalDecision(
   }
 
   return unsigned;
+}
+
+/**
+ * Computes the request-binding hash for an approval decision:
+ * base64 SHA-256 over the canonical JSON bytes of the full request.
+ * Both peers produce identical bytes for identical structured data
+ * (canonicalJson sorts keys recursively and strips whitespace), so the
+ * desktop can recompute this from the request it sent.
+ */
+export function approvalRequestHash(req: ToolApprovalRequest): string {
+  const canonicalBytes = new TextEncoder().encode(canonicalJson(req));
+  return bytesToBase64(sha256Bytes(canonicalBytes));
+}
+
+/**
+ * Checks that a decision's requestHash matches the given request.
+ * Returns false (does not throw) on malformed input. This does NOT check
+ * the signature — callers must ALSO call verifyApprovalDecision. A decision
+ * is only trustworthy when BOTH pass.
+ */
+export function verifyDecisionBinding(
+  dec: ApprovalDecision,
+  req: ToolApprovalRequest,
+): boolean {
+  try {
+    if (!dec || typeof dec !== "object") return false;
+    if (typeof dec.requestHash !== "string" || dec.requestHash.length === 0) {
+      return false;
+    }
+    if (!req || typeof req !== "object") return false;
+    return dec.requestHash === approvalRequestHash(req);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -132,6 +171,9 @@ export function signApprovalDecision(
 /**
  * Verifies an approval decision's signature against an Ed25519 public key.
  * Returns false (does not throw) on any malformed input or verification failure.
+ * NOTE: this checks the signature only. It does NOT check that the decision
+ * was made for a particular request — call verifyDecisionBinding(dec, req)
+ * with the request the user saw, and require BOTH to pass.
  */
 export function verifyApprovalDecision(
   dec: ApprovalDecision,
@@ -164,7 +206,7 @@ export interface DecideWithBiometricOptions {
   requestBiometric: () => Promise<boolean>;
   build: () => Omit<ApprovalDecision, "signature">;
   sign: (unsigned: Omit<ApprovalDecision, "signature">) => ApprovalDecision;
-  onDecision: (dec: ApprovalDecision) => void;
+  onDecision: (dec: ApprovalDecision) => Promise<void>;
   onDenied: (reason: string) => void;
 }
 
@@ -183,5 +225,5 @@ export async function decideWithBiometric(
 
   const unsigned = opts.build();
   const signed = opts.sign(unsigned);
-  opts.onDecision(signed);
+  await opts.onDecision(signed);
 }

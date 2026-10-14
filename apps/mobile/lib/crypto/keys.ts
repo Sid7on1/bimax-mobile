@@ -99,6 +99,16 @@ export function hkdfSha256(
 }
 
 /**
+ * SHA-256 digest. Returns the raw 32-byte digest.
+ */
+export function sha256Bytes(data: Uint8Array): Uint8Array {
+  if (!(data instanceof Uint8Array)) {
+    throw new Error("sha256Bytes: data must be a Uint8Array");
+  }
+  return sha256(data);
+}
+
+/**
  * ChaCha20-Poly1305 AEAD encryption.
  * Key must be 32 bytes; nonce must be 12 bytes.
  */

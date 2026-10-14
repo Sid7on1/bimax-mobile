@@ -1,13 +1,7 @@
 import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
-
-export interface OutboxRow {
-  id: string;
-  to_device: string;
-  envelope: string;
-  created_at: number;
-}
+import type { Sql } from "./logic";
 
 export interface DeviceRow {
   device_id: string;
@@ -40,12 +34,30 @@ export class RelayStore {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_outbox_to ON outbox(to_device, created_at);
+      CREATE TABLE IF NOT EXISTS pins (
+        device_id TEXT PRIMARY KEY,
+        pubkey TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS devices (
         device_id TEXT PRIMARY KEY,
         role TEXT NOT NULL,
         last_seen INTEGER NOT NULL
       );
     `);
+  }
+
+  getSql(): Sql {
+    const db = this.db;
+    return {
+      exec: (sql: string, ...params: unknown[]) => {
+        const stmt = db.prepare(sql);
+        if (stmt.reader) {
+          return { rows: stmt.all(...params) as Record<string, unknown>[] };
+        }
+        stmt.run(...params);
+        return { rows: [] };
+      },
+    };
   }
 
   recordDevice(deviceId: string, role: string, lastSeen: number): void {
@@ -78,31 +90,6 @@ export class RelayStore {
       SELECT device_id, role, last_seen FROM devices
     `);
     return stmt.all() as DeviceRow[];
-  }
-
-  saveOutbox(id: string, toDevice: string, envelope: string, createdAt: number): void {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO outbox (id, to_device, envelope, created_at)
-      VALUES (?, ?, ?, ?)
-    `);
-    stmt.run(id, toDevice, envelope, createdAt);
-  }
-
-  getOutboxForDevice(toDevice: string): OutboxRow[] {
-    const stmt = this.db.prepare(`
-      SELECT id, to_device, envelope, created_at
-      FROM outbox
-      WHERE to_device = ?
-      ORDER BY created_at ASC
-    `);
-    return stmt.all(toDevice) as OutboxRow[];
-  }
-
-  deleteOutbox(id: string): void {
-    const stmt = this.db.prepare(`
-      DELETE FROM outbox WHERE id = ?
-    `);
-    stmt.run(id);
   }
 
   close(): void {

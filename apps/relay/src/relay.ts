@@ -1,16 +1,26 @@
-import type { Envelope, DeviceHello, DeliveryAck, Presence, DeviceRole } from "@bimax/protocol";
+import type { Envelope, Presence, DeviceRole } from "@bimax/protocol";
 import { WebSocket } from "ws";
 import type { RelayStore } from "./store";
+import {
+  RoomStore,
+  RateLimiter,
+  verifyHello,
+  processPostHelloMessage,
+  type DeviceAttachment,
+} from "./logic";
 
 const PROTOCOL_VERSION = 1;
 
 export class Relay {
   private store: RelayStore;
+  private roomStore: RoomStore;
+  private rateLimiter = new RateLimiter();
   private onlineSockets = new Map<string, WebSocket>();
   private socketToDevice = new Map<WebSocket, { deviceId: string; role: DeviceRole }>();
 
   constructor(store: RelayStore) {
     this.store = store;
+    this.roomStore = new RoomStore(store.getSql());
   }
 
   isDeviceOnline(deviceId: string): boolean {
@@ -21,49 +31,34 @@ export class Relay {
   handleConnection(ws: WebSocket): void {
     let isIdentified = false;
     let currentDeviceId: string | null = null;
+    let currentRole: DeviceRole | null = null;
 
     ws.on("message", (data: Buffer | string) => {
       const rawText = typeof data === "string" ? data : data.toString("utf8");
 
-      let env: Envelope<string, unknown>;
-      try {
-        env = JSON.parse(rawText);
-      } catch {
-        if (!isIdentified) {
-          ws.close();
-        }
-        return;
-      }
-
-      if (!env || typeof env !== "object") {
-        if (!isIdentified) {
-          ws.close();
-        }
-        return;
-      }
-
       // 1. FIRST message must be hello
       if (!isIdentified) {
-        if (env.kind !== "hello" || !env.payload || typeof env.payload !== "object") {
-          ws.close();
+        let env: unknown;
+        try {
+          env = JSON.parse(rawText);
+        } catch {
+          ws.close(4400, "invalid json");
           return;
         }
 
-        const hello = env.payload as DeviceHello;
-        if (
-          hello.protocolVersion !== PROTOCOL_VERSION ||
-          typeof hello.deviceId !== "string" ||
-          !hello.deviceId ||
-          (hello.role !== "desktop" && hello.role !== "mobile")
-        ) {
-          ws.close();
+        const res = verifyHello(env, Date.now(), (id) => this.roomStore.getPin(id));
+        if (!res.ok) {
+          ws.close(res.code, res.reason);
           return;
         }
+
+        if (res.isNewPin) this.roomStore.setPin(res.deviceId, res.helloPubkey);
+        const deviceId = res.deviceId;
+        const role = res.role;
 
         isIdentified = true;
-        const deviceId = hello.deviceId;
-        const role = hello.role as DeviceRole;
         currentDeviceId = deviceId;
+        currentRole = role;
         const now = Date.now();
 
         // Stale session eviction:
@@ -138,11 +133,11 @@ export class Relay {
         }
 
         // Drain that device's outbox rows in created_at order over the new socket
-        const pending = this.store.getOutboxForDevice(deviceId);
+        const pending = this.roomStore.drainOutbox(deviceId);
         for (const row of pending) {
           if (ws.readyState === WebSocket.OPEN) {
             try {
-              ws.send(row.envelope);
+              ws.send(row);
             } catch {
               break;
             }
@@ -153,44 +148,16 @@ export class Relay {
       }
 
       // 2. Subsequent messages
-      const now = Date.now();
-      if (currentDeviceId) {
-        this.store.updateLastSeen(currentDeviceId, now);
-      }
-
-      // Handle delivery_ack
-      if (env.kind === "delivery_ack") {
-        const ack = env.payload as DeliveryAck;
-        if (ack && typeof ack.id === "string") {
-          this.store.deleteOutbox(ack.id);
-        }
-
-        if (env.to === "relay") {
-          return;
-        }
-      }
-
-      const targetDeviceId = env.to;
-      if (!targetDeviceId || targetDeviceId === "relay") {
-        return;
-      }
-
-      // Route by `to`
-      const targetWs = this.onlineSockets.get(targetDeviceId);
-      let delivered = false;
-
-      if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-        try {
-          targetWs.send(rawText);
-          delivered = true;
-        } catch {
-          delivered = false;
-        }
-      }
-
-      if (!delivered) {
-        this.store.saveOutbox(env.id, targetDeviceId, rawText, now);
-      }
+      if (!currentDeviceId || !currentRole) return;
+      const attachment: DeviceAttachment = { deviceId: currentDeviceId, role: currentRole };
+      const findTarget = (targetId: string) => {
+        const targetWs = this.onlineSockets.get(targetId);
+        return targetWs && targetWs.readyState === WebSocket.OPEN
+          ? { send: (data: string) => targetWs.send(data) }
+          : null;
+      };
+      const outcome = processPostHelloMessage(rawText, attachment, this.roomStore, this.rateLimiter, findTarget, Date.now());
+      if (outcome.closeCode) ws.close(outcome.closeCode, outcome.closeReason);
     });
 
     ws.on("close", () => {
@@ -234,5 +201,15 @@ export class Relay {
     ws.on("error", () => {
       // socket error
     });
+  }
+
+  reapIdle(now: number = Date.now()): void {
+    for (const [deviceId, ws] of this.onlineSockets) {
+      const lastSeen = this.roomStore.getDeviceLastSeen(deviceId);
+      if (lastSeen !== null && now - lastSeen > 600_000) {
+        try { ws.close(1001, "idle timeout"); } catch { /* ignore */ }
+      }
+    }
+    this.roomStore.pruneExpired(now);
   }
 }

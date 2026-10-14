@@ -52,17 +52,20 @@ export function parseAdvertisement(qrText: string): PairingAdvertisement {
     throw new Error("parseAdvertisement: missing or invalid field 'app' (must be 'bimax')");
   }
 
-  return {
+  const res: PairingAdvertisement = {
     relayUrl: obj.relayUrl,
-    lanRelayUrl:
-      typeof obj.lanRelayUrl === "string" && obj.lanRelayUrl.trim().length > 0
-        ? obj.lanRelayUrl
-        : undefined,
     ref: obj.ref,
     desktopDeviceId: obj.desktopDeviceId,
     desktopPublicKey: obj.desktopPublicKey,
     app: "bimax",
   };
+  if (
+    typeof obj.lanRelayUrl === "string" &&
+    obj.lanRelayUrl.trim().length > 0
+  ) {
+    res.lanRelayUrl = obj.lanRelayUrl;
+  }
+  return res;
 }
 
 /**

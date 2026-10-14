@@ -92,8 +92,6 @@ export class RelayClient {
 
     const onOpen = async () => {
       if (this.ws !== socket) return;
-      this.setStatus("online");
-      this.backoffMs = 1000;
 
       const id = this.randomId();
       const ts = Date.now();
@@ -128,6 +126,11 @@ export class RelayClient {
             helloSignature: bytesToBase64(sig),
           };
         } catch {
+          // The hello could not be signed. Tear the socket down and let the
+          // reconnect loop retry — a socket must never stay "online"
+          // without a hello sent.
+          this.cleanupCurrentSocket();
+          handleDisconnect();
           return;
         }
       } else {
@@ -154,7 +157,11 @@ export class RelayClient {
         socket.send(JSON.stringify(helloEnv));
       } catch {
         // write error will trigger close/error listener
+        return;
       }
+
+      this.setStatus("online");
+      this.backoffMs = 1000;
 
       // Drain outbox FIFO
       const queued = this.outbox.slice();

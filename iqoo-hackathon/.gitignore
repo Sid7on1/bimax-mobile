@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Temporary and build artifacts
+*.log
+*.tmp
+*.bak
+.idea/
+.vscode/
+
+# Local build artifacts
+build/
+dist/
+node_modules/

@@ -1,5 +1,14 @@
 node_modules/
 dist/
+build/
 .expo/
-*.log
+*.tsbuildinfo
 .DS_Store
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+.wrangler/
+*.log
+
+

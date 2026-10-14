@@ -143,4 +143,8 @@ export class PairingManager {
   hasPending(deviceId: string): boolean {
     return this.pending.has(deviceId);
   }
+
+  hasPendingPairing(deviceId: string): boolean {
+    return this.hasPending(deviceId);
+  }
 }

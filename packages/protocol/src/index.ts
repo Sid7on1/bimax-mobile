@@ -1,9 +1,19 @@
 /**
- * @bimax/protocol v1.5 — wire protocol between the Bimax desktop engine
+ * @bimax/protocol v1.7 — wire protocol between the Bimax desktop engine
  * and the mobile companion app.
  *
  * PURE TYPES ONLY. No runtime code, no dependencies.
  * This package is owned by the architect. Do not edit without approval.
+ *
+ * v1.7 (2026-10-13, additive): MessageKind gains chat_message, chat_token,
+ * chat_done, file_offer, file_accept, file_reject, file_chunk, file_done,
+ * file_received, file_error; new payload interfaces ChatMessage, ChatToken,
+ * ChatDone, FileOffer, FileAccept, FileReject, FileChunk, FileDone,
+ * FileReceived, FileError.
+ *
+ * v1.6 (2026-10-13, additive): ApprovalDecision gains required `requestHash`
+ * (base64 SHA-256 over the canonical JSON bytes of the ToolApprovalRequest
+ * the user saw), binding the signed decision to the exact request content.
  *
  * v1.5 (2026-10-13, additive): authenticated DeviceHello (helloPubkey, helloSignature)
  * with TOFU pin semantics; PairingAdvertisement gains optional lanRelayUrl;
@@ -53,6 +63,16 @@ export type MessageKind =
   | "command_result"
   | "kill_request"
   | "kill_result"
+  | "chat_message"
+  | "chat_token"
+  | "chat_done"
+  | "file_offer"
+  | "file_accept"
+  | "file_reject"
+  | "file_chunk"
+  | "file_done"
+  | "file_received"
+  | "file_error"
   | "error";
 
 /* ---------------- transport envelope ---------------- */
@@ -237,7 +257,11 @@ export interface ApprovalDecision {
   decision: ApprovalDecisionValue;
   decidedAt: number;
   denyReason?: "not_me" | "mistake"; // "not_me" raises a security alert
-  signature: string; // base64 Ed25519 over canonical bytes; desktop verifies
+  requestHash: string; // base64 SHA-256 over the canonical JSON bytes of the
+                       // ToolApprovalRequest the user saw; the desktop MUST
+                       // recompute it from its stored request and reject on
+                       // mismatch BEFORE acting on the decision
+  signature: string; // base64 Ed25519 over canonical bytes of everything above; desktop verifies
 }
 
 /* ---------------- commands: mobile -> desktop ---------------- */
@@ -269,3 +293,68 @@ export interface ProtocolError {
   message: string;
   retryable: boolean;
 }
+
+/* ---------------- chat mode (v1.7) ---------------- */
+
+export interface ChatMessage {
+  idempotencyKey: string; // non-empty, ≤128 chars
+  sessionId?: string;
+  text: string;           // ≤32 KB; empty text with no fileIds is rejected
+  fileIds?: string[];
+  sentAt: number;
+}
+
+export interface ChatToken {
+  idempotencyKey: string;
+  seq: number;
+  token: string;
+}
+
+export interface ChatDone {
+  idempotencyKey: string;
+  sessionId: string;
+  ok: boolean;
+  error?: string;
+  at: number;
+}
+
+/* ---------------- secure file transfer (v1.7) ---------------- */
+
+export interface FileOffer {
+  transferId: string;     // 128-bit random hex, client-generated
+  name: string;           // ≤255 chars
+  mime: string;           // allowlist: application/pdf, image/*, text/*, application/octet-stream
+  sizeBytes: number;      // ≤ 25 MB
+  sha256: string;         // hex SHA-256 of the complete file
+}
+
+export interface FileAccept {
+  transferId: string;
+}
+
+export interface FileReject {
+  transferId: string;
+  reason: string;
+}
+
+export interface FileChunk {
+  transferId: string;
+  seq: number;
+  data: string; // data: base64, decodes to ≤ 64 KB plaintext per chunk
+}
+
+export interface FileDone {
+  transferId: string;
+}
+
+export interface FileReceived {
+  transferId: string;
+  fileId: string;
+}
+
+export interface FileError {
+  transferId: string;
+  code: string;
+  message: string;
+}
+

@@ -8,6 +8,21 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const WebSocket = require("ws");
+import { ed25519 } from "@noble/curves/ed25519.js";
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function createSigner(kp) {
+  const pubkeyB64 = bytesToBase64(kp.publicKey);
+  return {
+    pubkeyB64,
+    sign: async (msg) => ed25519.sign(msg, kp.secretKey),
+  };
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../../..");
@@ -115,6 +130,8 @@ async function run() {
   const wsUrl = `ws://127.0.0.1:${PORT}`;
 
   // STEP 1 (hello + presence)
+  const kpA = ed25519.keygen();
+  const signerA = createSigner(kpA);
   const msgsA = [];
   const statusesA = [];
   const clientA = new RelayClient({
@@ -122,6 +139,7 @@ async function run() {
     deviceId: "desktop-1",
     role: "desktop",
     wsImpl: WebSocket,
+    helloSigner: signerA,
     onMessage: (env) => msgsA.push(env),
     onStatus: (s) => statusesA.push(s),
   });
@@ -133,12 +151,15 @@ async function run() {
     await new Promise((r) => setTimeout(r, 50));
   }
 
+  const kpB = ed25519.keygen();
+  const signerB = createSigner(kpB);
   const msgsB = [];
   const clientB = new RelayClient({
     url: wsUrl,
     deviceId: "mobile-1",
     role: "mobile",
     wsImpl: WebSocket,
+    helloSigner: signerB,
     onMessage: (env) => msgsB.push(env),
   });
   clientB.connect();
@@ -222,6 +243,7 @@ async function run() {
     deviceId: "mobile-1",
     role: "mobile",
     wsImpl: WebSocket,
+    helloSigner: signerB,
     onMessage: (env) => msgsB2.push(env),
   });
   clientB2.connect();
@@ -253,6 +275,7 @@ async function run() {
     deviceId: "mobile-1",
     role: "mobile",
     wsImpl: WebSocket,
+    helloSigner: signerB,
     onMessage: (env) => msgsB3.push(env),
   });
   clientB3.connect();

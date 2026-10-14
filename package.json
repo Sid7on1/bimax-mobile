@@ -8,7 +8,21 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "noise-kat": "node apps/mobile/test/noise-test.mjs",
+    "pairing-test": "node apps/mobile/test/pairing-test.mjs",
+    "approvals-test": "node apps/mobile/test/approvals-test.mjs",
+    "e2e-test": "node apps/mobile/test/e2e-test.mjs",
+    "control-test": "node apps/mobile/test/control-test.mjs",
+    "hello-auth-test": "node apps/mobile/test/hello-auth-test.mjs",
+    "relay-smoke": "node apps/mobile/test/relay-smoke.mjs",
+    "nonce-test": "node apps/mobile/test/crypto-test.mjs",
+    "pairing": "node apps/mobile/test/pairing-test.mjs",
+    "approvals": "node apps/mobile/test/approvals-test.mjs",
+    "e2e": "node apps/mobile/test/e2e-test.mjs",
+    "control": "node apps/mobile/test/control-test.mjs",
+    "hello-auth": "node apps/mobile/test/hello-auth-test.mjs",
+    "nonce": "node apps/mobile/test/crypto-test.mjs"
   },
   "devDependencies": {
     "eslint": "^9.22.0",

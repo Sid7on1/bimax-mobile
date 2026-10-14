@@ -41,8 +41,10 @@ function ApprovalCard({
     setErrorMsg("");
     try {
       await onApprove(item.approvalId);
-    } catch {
-      setErrorMsg("Authentication failed");
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Approval failed",
+      );
     } finally {
       setLoading(false);
     }

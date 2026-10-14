@@ -1,0 +1,22 @@
+{
+  "name": "bimax-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "postcss": {},
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy --dry-run",
+    "deploy:live": "wrangler deploy"
+  },
+  "dependencies": {
+    "jose": "^5.9.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241004.0",
+    "typescript": "~5.8.3",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.114.0"
+  }
+}

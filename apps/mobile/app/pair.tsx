@@ -31,7 +31,8 @@ type PairingStep =
 
 export default function PairScreen() {
   const router = useRouter();
-  const { pairWithDesktop } = useRelayContext();
+  const { pairWithDesktop, refreshTrustedDesktop, dropSession } =
+    useRelayContext();
   const [step, setStep] = useState<PairingStep>("idle");
   const [advert, setAdvert] = useState<PairingAdvertisement | null>(null);
   const [manualText, setManualText] = useState("");
@@ -164,7 +165,7 @@ export default function PairScreen() {
             ) : (
               <View style={styles.cameraContainer}>
                 <CameraView
-                  style={StyleSheet.absoluteFillObject}
+                  style={StyleSheet.absoluteFill}
                   barcodeScannerSettings={{
                     barcodeTypes: ["qr"],
                   }}
@@ -305,8 +306,19 @@ export default function PairScreen() {
                       relayUrl: advert.relayUrl,
                       lanRelayUrl: advert.lanRelayUrl,
                     });
+                  } catch (err) {
+                    // Never report success without a saved record.
+                    setErrorMessage(
+                      err instanceof Error ? err.message : "Could not save trusted desktop",
+                    );
+                    setStep("error");
+                    return;
+                  }
+                  try {
+                    await refreshTrustedDesktop();
                   } catch {
-                    // ignore
+                    // Ignore: the record is saved, so pairing succeeded. Worst
+                    // case the home card corrects itself on next launch.
                   }
                 }
                 setStep("done");
@@ -319,6 +331,10 @@ export default function PairScreen() {
             <TouchableOpacity
               style={styles.dangerButton}
               onPress={() => {
+                // Tear down the session: this peer was never verified.
+                if (advert) {
+                  dropSession(advert.desktopDeviceId);
+                }
                 setErrorMessage(
                   "Verification code mismatch! The connection may be intercepted. Please rescan.",
                 );
@@ -511,7 +527,7 @@ const styles = StyleSheet.create({
     position: "relative",
   },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: "center",
     alignItems: "center",
     backgroundColor: "rgba(0, 0, 0, 0.4)",
