@@ -82,6 +82,8 @@ describe("auth module", () => {
     const jwt = await new SignJWT({ email: "user@example.com" })
       .setProtectedHeader({ alg: "RS256", kid: "test-kid-1" })
       .setSubject("user_supabase_12345")
+      .setIssuer("https://test-project.supabase.co/auth/v1")
+      .setAudience("authenticated")
       .setIssuedAt()
       .setExpirationTime("2h")
       .sign(privateKey);
@@ -103,6 +105,8 @@ describe("auth module", () => {
     const jwt = await new SignJWT({ email: "attacker@example.com" })
       .setProtectedHeader({ alg: "RS256", kid: "test-kid-1" })
       .setSubject("attacker_sub")
+      .setIssuer("https://test-project.supabase.co/auth/v1")
+      .setAudience("authenticated")
       .setIssuedAt()
       .setExpirationTime("2h")
       .sign(otherPrivateKey);

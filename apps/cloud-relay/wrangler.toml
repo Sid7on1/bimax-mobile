@@ -9,3 +9,8 @@ class_name = "Room"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+[observability]
+enabled = true
+head_sampling_rate = 0.1
+redact_query_string = true

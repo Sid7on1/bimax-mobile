@@ -1,0 +1,79 @@
+{
+  "reviewDate": "2026-10-20",
+  "recordedAt": "2026-10-19T20:19:15.767Z",
+  "reviewer": "Codex internal author review",
+  "runtime": "v24.15.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "featureEnabledByDefault": false,
+  "independentCryptographicReview": false,
+  "physicalDeviceValidation": false,
+  "findingsFixed": 10,
+  "initialReproductions": {
+    "tests": 6,
+    "failedBeforeFixes": 6,
+    "evidence": "pq-security-review-before-tests-2026-10-20.txt"
+  },
+  "validation": {
+    "command": "npm run check",
+    "result": "passed",
+    "typecheck": "passed",
+    "lint": "passed",
+    "originalPqGroups": 15,
+    "securityReviewTests": 15,
+    "gatewayTests": 47,
+    "desktopIntegrationCases": 14,
+    "workerRuntimeChecks": "passed",
+    "evidence": "pq-security-review-check-2026-10-20.txt"
+  },
+  "dependencies": [
+    {
+      "name": "@noble/post-quantum",
+      "version": "0.7.1",
+      "packageJsonSha256": "193687769e8bd4d6a098a1c7f78985c2eadf23b70f2005369eb986521b28927f"
+    },
+    {
+      "name": "@noble/curves",
+      "version": "2.4.0",
+      "packageJsonSha256": "63d976a6ee72f2dcdc81e6c8bf907edff54eb20e8423218578fbfaf29cff96e6"
+    },
+    {
+      "name": "@noble/ciphers",
+      "version": "2.4.0",
+      "packageJsonSha256": "feb7f2751f467dbde186fbcbaa7512ca0fe4c30bd0429e9e276d0c186357697b"
+    },
+    {
+      "name": "@noble/hashes",
+      "version": "2.4.0",
+      "packageJsonSha256": "3e361734f5269de162fa362483d7f45dee7efb533ec217157945338f7591baaf"
+    }
+  ],
+  "dependencyAudit": {
+    "counts": {
+      "info": 0,
+      "low": 0,
+      "moderate": 3,
+      "high": 18,
+      "critical": 0,
+      "total": 21
+    },
+    "nobleAdvisories": [],
+    "scope": "Full application dependency graph; existing Expo/Metro/React Native advisories require separate remediation."
+  },
+  "reviewedSourceSha256": {
+    "packages/core/src/crypto/pq.ts": "99862ee3863709d055df0ae5f30b34f5ee1ad3a252145fa0db3fd4cc4d6c7c1c",
+    "packages/core/src/crypto/noise.ts": "d801610bbc4d7ad588274edd193f1d125f2efeb333c637f2b84d0146885919f3",
+    "packages/core/src/crypto/pairing.ts": "1380a0d72c843578bd4dee62188e416f75b95f2f9827aee1d6eeec549dbf1767",
+    "packages/core/src/session/session.ts": "bf8b8eff99066ee27b706006ce436ed31607ebc16860a013f8f954d7cc41ba47",
+    "packages/core/src/session/lifecycle.ts": "06fbba4421ac4f8beaf97bab2ae5d263dd0871936ded9ee7ff125378dc125d70",
+    "packages/core/src/session/attempt.ts": "3e040a070de0d9c638b3327a5a64e9b280e5bcd99abab77bee4929e3bdf9e05c",
+    "packages/core/src/session/prekey-lookup.ts": "95b99ca1d0f0e43fdcbeb1f3d7698167f36d74a8753df042e04951386f7a5874",
+    "apps/desktop-responder/src/pairing.ts": "a776927e220107b12c5e0b945c5da5be961425b1503905764d344db85db3fb0f",
+    "apps/desktop-responder/src/responder.ts": "3ab8cb5b134665ee62626e89487228fbc872a5715ffd4708caa8d6bb0af7b044",
+    "apps/mobile/lib/session/provider.tsx": "1ea2e736a42120eb0b2648071247eefd2e3bb286ed708051b2571370d26100a7",
+    "apps/mobile/lib/crypto/secure-store.ts": "4c3f631c862421fb292e02db13493b09ab9a3c7df5e0b980e422b8cd385bde46",
+    "apps/mobile/app/pair.tsx": "262d39b452440438c9c125deb20928d89e14dac0089d5470771224a69dfe90b2",
+    "packages/protocol/src/index.ts": "c7eed5500f162ab061fd16107c23fd01cc3caa1e39bc39ebe88196d36db0cba8",
+    "packages/core/test/security-review-test.mjs": "2127321749d2110085eacdbb8e69a7750d7c3614b8fbfd9b179ba0ef6ffc829e"
+  }
+}

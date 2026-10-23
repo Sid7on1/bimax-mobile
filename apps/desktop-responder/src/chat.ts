@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatToken, ChatDone } from "@bimax/protocol";
 import type { EnginePort } from "./engine-port";
+import { canonicalJson } from "./crypto/keys";
 import { IdempotencyLog } from "./idempotency";
 
 export interface ChatHandlerOptions {
@@ -8,6 +9,7 @@ export interface ChatHandlerOptions {
   sendToken: (token: ChatToken) => void;
   sendDone: (done: ChatDone) => void;
   maxBufferBytes?: number;
+  authorize: (msg: ChatMessage, peer: string) => Promise<void>;
 }
 
 const MAX_TEXT_LENGTH = 32 * 1024; // 32 KB
@@ -19,8 +21,10 @@ export class ChatHandler {
   private sendToken: (token: ChatToken) => void;
   private sendDone: (done: ChatDone) => void;
   private maxBufferBytes: number;
+  private authorize: ChatHandlerOptions["authorize"];
 
   constructor(opts: ChatHandlerOptions) {
+    this.authorize = opts.authorize;
     this.enginePort = opts.enginePort;
     this.idempotency = opts.idempotency;
     this.sendToken = opts.sendToken;
@@ -31,89 +35,118 @@ export class ChatHandler {
   /**
    * Handles an incoming chat_message frame per contract §9.
    */
-  public async handleMessage(msg: ChatMessage): Promise<ChatDone> {
+  public async handleMessage(msg: ChatMessage, peer = ""): Promise<ChatDone> {
     if (!msg || typeof msg !== "object") {
       throw new Error("Chat message must be an object");
     }
 
-    IdempotencyLog.validateKey(msg.idempotencyKey);
+    try {
+      IdempotencyLog.validateKey(msg.idempotencyKey);
+      if (
+        typeof msg.text !== "string" ||
+        new TextEncoder().encode(msg.text).length > MAX_TEXT_LENGTH ||
+        !Number.isSafeInteger(msg.sentAt) ||
+        Math.abs(Date.now() - msg.sentAt) > 120_000 ||
+        (msg.sessionId !== undefined &&
+          (typeof msg.sessionId !== "string" || msg.sessionId.length > 128)) ||
+        (msg.fileIds !== undefined &&
+          (!Array.isArray(msg.fileIds) ||
+            msg.fileIds.length > 16 ||
+            !msg.fileIds.every((id) => typeof id === "string" && /^f-[0-9a-f]{32}$/.test(id)))) ||
+        (!msg.text.trim() && !msg.fileIds?.length)
+      )
+        throw new Error("Invalid chat request");
 
-    const hasText = typeof msg.text === "string" && msg.text.trim().length > 0;
-    const hasFiles = Array.isArray(msg.fileIds) && msg.fileIds.length > 0;
+      const { result: done } = await this.idempotency.execute<ChatDone>(
+        msg.idempotencyKey,
+        async () => {
+          await this.authorize(msg, peer);
+          let seq = 0;
+          let bufferedBytes = 0;
 
-    if (!hasText && !hasFiles) {
-      const errDone: ChatDone = {
-        idempotencyKey: msg.idempotencyKey,
-        sessionId: msg.sessionId ?? "",
-        ok: false,
-        error: "Empty text with no fileIds is rejected",
-        at: Date.now(),
-      };
-      this.sendDone(errDone);
-      return errDone;
-    }
+          let pendingText = "";
+          let truncated = false;
+          const flush = () => {
+            if (!pendingText) return;
+            let end = Math.min(8192, pendingText.length);
+            if (end < pendingText.length) {
+              const code = pendingText.charCodeAt(end - 1);
+              if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+            }
+            const token = pendingText.slice(0, end);
+            pendingText = pendingText.slice(end);
+            this.sendToken({ idempotencyKey: msg.idempotencyKey, seq: seq++, token });
+          };
+          // Coalesce provider tokens so streaming and its ACKs fit relay rate limits.
+          const timer = setInterval(flush, 100);
+          const onToken = (token: string) => {
+            const size = new TextEncoder().encode(token).length;
+            if (bufferedBytes + size > this.maxBufferBytes) {
+              truncated = true;
+              return;
+            }
+            bufferedBytes += size;
+            pendingText += token;
+          };
 
-    if (typeof msg.text === "string" && msg.text.length > MAX_TEXT_LENGTH) {
-      const errDone: ChatDone = {
-        idempotencyKey: msg.idempotencyKey,
-        sessionId: msg.sessionId ?? "",
-        ok: false,
-        error: `Text exceeds maximum allowed size of 32 KB (${msg.text.length} chars)`,
-        at: Date.now(),
-      };
-      this.sendDone(errDone);
-      return errDone;
-    }
+          try {
+            const res = await this.enginePort.chat(
+              {
+                idempotencyKey: msg.idempotencyKey,
+                sessionId: msg.sessionId,
+                text: msg.text,
+                fileIds: msg.fileIds,
+              },
+              onToken,
+            );
 
-    const { result: done } = await this.idempotency.execute<ChatDone>(
-      msg.idempotencyKey,
-      async () => {
-        let seq = 0;
-        let bufferedBytes = 0;
-
-        const onToken = (token: string) => {
-          const tokenLen = new TextEncoder().encode(token).length;
-          if (bufferedBytes + tokenLen <= this.maxBufferBytes) {
-            bufferedBytes += tokenLen;
-            this.sendToken({
+            clearInterval(timer);
+            while (pendingText) {
+              flush();
+              if (pendingText) await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+            return {
               idempotencyKey: msg.idempotencyKey,
-              seq: seq++,
-              token,
-            });
+              sessionId: res.sessionId,
+              ok: !truncated,
+              error: truncated ? "Response exceeded remote stream limit" : undefined,
+              at: Date.now(),
+            };
+          } catch {
+            return {
+              idempotencyKey: msg.idempotencyKey,
+              sessionId: msg.sessionId ?? "",
+              ok: false,
+              error: "Desktop chat failed; check the desktop",
+              at: Date.now(),
+            };
+          } finally {
+            clearInterval(timer);
           }
-        };
+        },
+        undefined,
+        canonicalJson({
+          peer,
+          kind: "chat_message",
+          text: msg.text,
+          sessionId: msg.sessionId,
+          fileIds: msg.fileIds,
+        }),
+      );
 
-        try {
-          const res = await this.enginePort.chat(
-            {
-              idempotencyKey: msg.idempotencyKey,
-              sessionId: msg.sessionId,
-              text: msg.text,
-              fileIds: msg.fileIds,
-            },
-            onToken,
-          );
-
-          return {
-            idempotencyKey: msg.idempotencyKey,
-            sessionId: res.sessionId,
-            ok: true,
-            at: Date.now(),
-          };
-        } catch (err) {
-          return {
-            idempotencyKey: msg.idempotencyKey,
-            sessionId: msg.sessionId ?? "",
-            ok: false,
-            error: err instanceof Error ? err.message : String(err),
-            at: Date.now(),
-          };
-        }
-      },
-    );
-
-    // Send completion frame
-    this.sendDone(done);
-    return done;
+      // Send completion frame
+      this.sendDone(done);
+      return done;
+    } catch {
+      const done: ChatDone = {
+        idempotencyKey: typeof msg.idempotencyKey === "string" ? msg.idempotencyKey : "",
+        sessionId: typeof msg.sessionId === "string" ? msg.sessionId : "",
+        ok: false,
+        error: "Chat request rejected or outcome unknown; check desktop before retrying",
+        at: Date.now(),
+      };
+      this.sendDone(done);
+      return done;
+    }
   }
 }

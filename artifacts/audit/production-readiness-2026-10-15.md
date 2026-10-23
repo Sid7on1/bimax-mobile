@@ -1,3 +1,31 @@
+**Further remediation — 16 October 2026:** [Round 3 and BMA dispositions](../../docs/SECURITY-REMEDIATION-2026-10-16.md). Original findings below remain historical.
+
+**Remediation update — 15 October 2026**
+
+This document preserves the original audit and its historical 3/10 readiness assessment. The repo now contains a coordinated protocol 2 hardening change. Current behavior, deployment requirements, and remaining release checks are documented in [PRODUCTION-HARDENING.md](/Users/vishsiddharth/Desktop/bimax-mobile/docs/PRODUCTION-HARDENING.md). Source line references below describe the earlier snapshot and may have moved.
+
+| Finding | Current disposition |
+| --- | --- |
+| F01 plaintext dispatch | Rejected before application handling; paired-device ID spoofing regression included |
+| F02 account isolation | Separate identity/trust keys and SQLite databases; relay state unmounts on sign-out; legacy unowned data preserved |
+| F03 entitlements | Active, unexpired entitlement required; payment-provider integration remains external |
+| F04 rate limits | Atomic D1 account counter replaces KV read/modify/write |
+| F05 spending | Atomic token/cost reservations, transaction-maintained totals, global ceiling, per-account concurrency limit, conservative unknown-usage accounting |
+| F06 crash idempotency | Write-ahead fsync and atomic results; unknown outcomes cannot re-execute; actual process-exit regression |
+| F07 delivery/recovery | Explicit packet nonce, bounded persisted logical outbox, authenticated results, session recovery, action deadlines, token batching; real-engine transcript sync remains external |
+| F08 pairing | Signing-key proof bound inside Noise transcript; normal real-socket pairing no longer requires a test-only key argument |
+| F09 relay abuse | Account-owned room tickets, room/socket/identity/storage bounds, hello deadline and replay tracking, idle alarm shutdown |
+| F10 JWT claims | Required subject, issuer, audience, issued-at and expiry |
+| F11 Noise conformance | Empty prologue hashed; protocol/frame version bumped; encoded frame and chunk limits enforced |
+| F12 validation/cancellation | Bounded request/context validation, cancellation/deadline propagation, incomplete-SSE detection |
+| F13 attachments | Only supported text content is offered; images/PDFs are visibly unavailable |
+| F14 desktop integration | Secure identity-store adapter and safe factory defaults provided; the real desktop host and engine must wire them |
+| F15 operations | CI, aggregate checks, pinned runtime/native dependencies, Worker observability/readiness, migration/deployment instructions; real-device and production recovery acceptance still required |
+
+The original reproduction is preserved as `reproduce-findings.before-hardening.cjs`. The current [reproduce-findings.cjs](/Users/vishsiddharth/Desktop/bimax-mobile/artifacts/audit/reproduce-findings.cjs) asserts the fixes and runs in the test gate. Dependency and check outputs are retained alongside this file. No live deployment or production-readiness certification is implied by these local changes.
+
+---
+
 **Bimax repository audit — 15 October 2026**
 
 **Verdict: promising prototype; not ready for a paid public launch.** The main component boundaries are sensible. The biggest weaknesses are enforcing trust at every entry point, controlling provider spend, and recovering safely across disconnects and process crashes. Several strong guarantees in the architecture document exceed what the implementation provides.
@@ -81,7 +109,7 @@ Cloudflare documents that KV lacks atomic read/write transactions and has a one-
 
 **F05 — Quota and metering do not provide a hard spending bound.**
 
-Evidence: [quota check](/Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/src/quota.ts:39), [request sanitization](/Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/src/providers.ts:79), [stream metering](/Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/src/index.ts:293), and [metering failures](/Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/src/metering.ts:24).
+Evidence: [quota check](/Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/src/quota.ts:39), [request sanitization](/Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/src/providers.ts:79), [stream metering](/Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/src/index.ts:293), and [metering failures](/Users/vishsiddharth/Desktop/bimax-mobile/artifacts/audit/before/metering.ts.txt:24).
 
 Quota checks happen before generation, but no tokens or money are reserved. There is no enforced output-token maximum or check that the requested work fits the remaining allocation. Reproduction: 100 concurrent requests were admitted against a 100-token budget; at 15 tokens each that would consume 1,500 tokens. Even a single request can exceed a small remaining balance.
 

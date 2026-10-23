@@ -20,6 +20,11 @@ export interface Env {
   MOCK_UPSTREAM?: string;
   SUPABASE_URL?: string;
   TEST_JWKS?: JSONWebKeySet;
+  MODEL_PRICES_JSON?: string;
+  RELAY_TICKET_SECRET?: string;
+  MAX_OUTPUT_TOKENS?: string;
+  ALLOWED_ORIGINS?: string;
+  GLOBAL_MONTHLY_MICROUSD?: string;
 }
 
 export async function sha256Hex(text: string): Promise<string> {
@@ -88,14 +93,17 @@ export async function verifyAuth(
     try {
       const { payload } = await jwtVerify(rawToken, getKey, {
         algorithms: ["RS256", "ES256"],
+        issuer: `${env.SUPABASE_URL?.replace(/\/+$/, "")}/auth/v1`,
+        audience: "authenticated",
+        requiredClaims: ["sub", "exp", "iat", "iss", "aud"],
       });
 
-      if (typeof payload.sub === "string" && payload.sub) {
-        const keyHash = await sha256Hex(rawToken);
+      if (typeof payload.sub === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(payload.sub)) {
+        const keyHash = await sha256Hex(payload.sub);
         return { userId: payload.sub, keyHash };
       }
       return null;
-    } catch (_err) {
+    } catch {
       return null;
     }
   }
@@ -105,7 +113,7 @@ export async function verifyAuth(
     const normalizedKey = rawToken.toLowerCase();
     const keyHash = await sha256Hex(normalizedKey);
     const userId = await env.GATEWAY_KEYS.get(keyHash);
-    if (!userId) {
+    if (!userId || !/^[A-Za-z0-9_-]{1,128}$/.test(userId)) {
       return null;
     }
     return { userId, keyHash };

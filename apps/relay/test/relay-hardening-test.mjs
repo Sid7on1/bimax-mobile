@@ -126,17 +126,18 @@ function buildSignedHello(deviceId, role, kp, overrides = {}) {
     deviceId,
     role,
     helloPubkey,
+    protocolVersion:2,
   });
   const sig = bytesToBase64(ed25519.sign(new TextEncoder().encode(msg), kp.secretKey));
   return {
-    v: overrides.v !== undefined ? overrides.v : 1,
+    v: overrides.v !== undefined ? overrides.v : 2,
     id,
     ts,
     from,
     to,
     kind: "hello",
     payload: {
-      protocolVersion: 1,
+      protocolVersion: 2,
       deviceId,
       role,
       helloPubkey,
@@ -160,14 +161,14 @@ async function run() {
     await new Promise((r) => ws1.on("open", r));
     ws1.send(
       JSON.stringify({
-        v: 1,
+        v: 2,
         id: "legacy-hello-1",
         ts: Date.now(),
         from: "dev-legacy",
         to: "relay",
         kind: "hello",
         payload: {
-          protocolVersion: 1,
+          protocolVersion: 2,
           deviceId: "dev-legacy",
           role: "desktop",
         },
@@ -248,7 +249,7 @@ async function run() {
 
     wsA.send(
       JSON.stringify({
-        v: 1,
+        v: 2,
         id: "msg-bad-from-1",
         ts: Date.now(),
         from: "device-B",
@@ -279,7 +280,7 @@ async function run() {
 
     wsA5.send(
       JSON.stringify({
-        v: 1,
+        v: 2,
         id: "",
         ts: Date.now(),
         from: "device-A5",
@@ -320,6 +321,12 @@ async function run() {
     const kpB6 = ed25519.keygen();
     const kpC6 = ed25519.keygen();
 
+    // Offline recipients must first register their signed identity.
+    const registerB6 = new WebSocket(wsUrl);
+    await new Promise((r) => registerB6.on("open",r));
+    registerB6.send(JSON.stringify(buildSignedHello("device-B6","mobile",kpB6)));
+    await new Promise((r) => setTimeout(r,100));
+    registerB6.close();
     const wsA6 = new WebSocket(wsUrl);
     await new Promise((r) => wsA6.on("open", r));
     wsA6.send(JSON.stringify(buildSignedHello("device-A6", "desktop", kpA6)));
@@ -327,7 +334,7 @@ async function run() {
 
     wsA6.send(
       JSON.stringify({
-        v: 1,
+        v: 2,
         id: "msg-ack-test-1",
         ts: Date.now(),
         from: "device-A6",
@@ -346,7 +353,7 @@ async function run() {
 
     wsC6.send(
       JSON.stringify({
-        v: 1,
+        v: 2,
         id: "ack-c-1",
         ts: Date.now(),
         from: "device-C6",
@@ -377,7 +384,7 @@ async function run() {
 
     wsB6_1.send(
       JSON.stringify({
-        v: 1,
+        v: 2,
         id: "ack-b-1",
         ts: Date.now(),
         from: "device-B6",

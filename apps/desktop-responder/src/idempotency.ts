@@ -2,276 +2,205 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 export interface IdempotencyEntry<T = unknown> {
-  status: "in-flight" | "done";
+  status: "in-flight" | "done" | "unknown";
   result?: T;
+  binding?: string;
   at: number;
 }
-
 export interface IdempotencyLogOptions {
   storagePath?: string;
   maxEntries?: number;
   ttlMs?: number;
 }
+export class OperationOutcomeUnknownError extends Error {
+  constructor() {
+    super(
+      "Operation outcome is unknown after interruption; reconcile with the engine before retrying",
+    );
+  }
+}
 
-const DEFAULT_MAX_ENTRIES = 10_000;
-const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-
+/** A write-ahead journal. Interrupted effects are never automatically replayed. */
 export class IdempotencyLog {
   private entries = new Map<string, IdempotencyEntry>();
   private inFlightPromises = new Map<string, Promise<unknown>>();
+  private persistence: Promise<void> = Promise.resolve();
   private storagePath?: string;
   private maxEntries: number;
   private ttlMs: number;
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
-
   constructor(opts: IdempotencyLogOptions = {}) {
     this.storagePath = opts.storagePath;
-    this.maxEntries = opts.maxEntries ?? DEFAULT_MAX_ENTRIES;
-    this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
+    this.maxEntries = opts.maxEntries ?? 10_000;
+    this.ttlMs = opts.ttlMs ?? 8 * 24 * 3600_000;
   }
-
-  /**
-   * Validates that an idempotency key is non-empty and <= 128 characters.
-   */
-  public static validateKey(key: string): void {
-    if (typeof key !== "string" || key.length === 0) {
-      throw new Error("Idempotency key must be a non-empty string");
-    }
-    if (key.length > 128) {
-      throw new Error("Idempotency key exceeds 128 characters");
-    }
-    if (key === "__proto__" || key === "constructor" || key === "prototype") {
-      throw new Error("Invalid reserved idempotency key");
-    }
+  static validateKey(key: string): void {
+    if (
+      typeof key !== "string" ||
+      !key ||
+      key.length > 128 ||
+      ["__proto__", "constructor", "prototype"].includes(key)
+    )
+      throw new Error("Invalid idempotency key");
   }
-
-  /**
-   * Initializes the idempotency log by loading persisted entries from disk if configured.
-   */
-  public async init(): Promise<void> {
+  async init(): Promise<void> {
     if (!this.storagePath) return;
-
     try {
-      const data = await fs.readFile(this.storagePath, "utf-8");
-      const parsed = JSON.parse(data) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const obj = parsed as Record<string, unknown>;
-        const now = Date.now();
-        for (const [key, val] of Object.entries(obj)) {
-          if (val && typeof val === "object" && !Array.isArray(val)) {
-            const entry = val as Partial<IdempotencyEntry>;
-            if (
-              entry.status === "done" &&
-              typeof entry.at === "number" &&
-              now - entry.at <= this.ttlMs
-            ) {
-              this.entries.set(key, {
-                status: "done",
-                result: entry.result,
-                at: entry.at,
-              });
-            }
-          }
-        }
+      const parsed: unknown = JSON.parse(await fs.readFile(this.storagePath, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("Corrupt operation journal");
+      for (const [key, value] of Object.entries(parsed)) {
+        IdempotencyLog.validateKey(key);
+        const entry = value as IdempotencyEntry;
+        if (
+          !entry ||
+          !["done", "in-flight", "unknown"].includes(entry.status) ||
+          !Number.isFinite(entry.at)
+        )
+          throw new Error("Corrupt operation journal entry");
+        this.entries.set(key, {
+          ...entry,
+          status: entry.status === "in-flight" ? "unknown" : entry.status,
+        });
       }
     } catch (err) {
-      const code = (err as { code?: string })?.code;
-      if (code !== "ENOENT") {
-        throw err;
-      }
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
     this.evict();
   }
-
-  /**
-   * Executes a task with idempotency protection.
-   * - If already done: immediately returns the stored result without calling `fn`.
-   * - If in-flight: awaits the existing task and returns its result without calling `fn`.
-   * - If miss: executes `fn()`, stores the result, and returns it.
-   */
-  public async execute<T>(
+  async execute<T>(
     key: string,
     fn: () => Promise<T>,
     onError?: (err: unknown) => T,
+    binding?: string,
   ): Promise<{ result: T; wasDuplicate: boolean }> {
     IdempotencyLog.validateKey(key);
     this.evict();
-
     const existing = this.entries.get(key);
     if (existing) {
-      if (existing.status === "done") {
-        // Refresh LRU position
-        this.entries.delete(key);
-        this.entries.set(key, existing);
-        return { result: existing.result as T, wasDuplicate: true };
-      }
-
-      if (existing.status === "in-flight") {
-        const inFlight = this.inFlightPromises.get(key);
-        if (inFlight) {
-          const res = (await inFlight) as T;
-          return { result: res, wasDuplicate: true };
-        }
-      }
+      if (existing.binding !== binding)
+        throw new Error("Idempotency key reused for a different operation");
+      if (existing.status === "done") return { result: existing.result as T, wasDuplicate: true };
+      const task = this.inFlightPromises.get(key);
+      if (task) return { result: (await task) as T, wasDuplicate: true };
+      throw new OperationOutcomeUnknownError();
     }
-
-    // Miss: create in-flight entry
-    const entry: IdempotencyEntry<T> = {
-      status: "in-flight",
-      at: Date.now(),
-    };
-    this.entries.set(key, entry as IdempotencyEntry);
-
-    let resolvePromise!: (val: T) => void;
-    let rejectPromise!: (err: unknown) => void;
-    const taskPromise = new Promise<T>((res, rej) => {
-      resolvePromise = res;
-      rejectPromise = rej;
+    // Never evict protection for recent or in-flight effects to admit more work.
+    if (this.entries.size >= this.maxEntries)
+      throw new Error("Operation journal capacity exhausted");
+    const entry: IdempotencyEntry = { status: "in-flight", binding, at: Date.now() };
+    this.entries.set(key, entry);
+    let resolve!: (value: T) => void;
+    let reject!: (err: unknown) => void;
+    const task = new Promise<T>((yes, no) => {
+      resolve = yes;
+      reject = no;
     });
-    // Prevent unhandled rejection when no duplicate caller is awaiting taskPromise
-    taskPromise.catch(() => {});
-    this.inFlightPromises.set(key, taskPromise);
-
-    this.enforceCapacity();
-
+    void task.catch(() => {});
+    this.inFlightPromises.set(key, task);
     try {
-      const result = await fn();
+      // This must complete successfully BEFORE any engine side effect.
+      await this.persistNow();
+      let result: T;
+      try {
+        result = await fn();
+      } catch (err) {
+        if (!onError) {
+          entry.status = "unknown";
+          await this.persistNow();
+          throw err;
+        }
+        result = onError(err);
+      }
       entry.status = "done";
       entry.result = result;
       entry.at = Date.now();
-
-      // Refresh LRU position
-      this.entries.delete(key);
-      this.entries.set(key, entry as IdempotencyEntry);
-      this.inFlightPromises.delete(key);
-
-      resolvePromise(result);
-      this.schedulePersist();
+      try {
+        await this.persistNow();
+      } catch (err) {
+        entry.status = "unknown";
+        delete entry.result;
+        throw err;
+      }
+      resolve(result);
       return { result, wasDuplicate: false };
     } catch (err) {
-      if (onError) {
-        const result = onError(err);
-        entry.status = "done";
-        entry.result = result;
-        entry.at = Date.now();
-
-        // Refresh LRU position
-        this.entries.delete(key);
-        this.entries.set(key, entry as IdempotencyEntry);
-        this.inFlightPromises.delete(key);
-
-        resolvePromise(result);
-        this.schedulePersist();
-        return { result, wasDuplicate: false };
-      }
-
-      this.entries.delete(key);
+      if (entry.status === "in-flight") entry.status = "unknown";
+      reject(err);
+      throw err;
+    } finally {
       this.inFlightPromises.delete(key);
-      rejectPromise(err);
+    }
+  }
+  get(key: string): IdempotencyEntry | undefined {
+    this.evict();
+    return this.entries.get(key);
+  }
+  get size(): number {
+    return this.entries.size;
+  }
+  /** Local host only: supply a result verified against the engine's durable effect history.
+   * Never delete unknown effects merely to free capacity or automatically execute them again.
+   */
+  async reconcileUnknown<T>(
+    key: string,
+    expectedBinding: string | undefined,
+    verifiedResult: T,
+  ): Promise<void> {
+    IdempotencyLog.validateKey(key);
+    const entry = this.entries.get(key);
+    if (
+      !entry ||
+      entry.status !== "unknown" ||
+      entry.binding !== expectedBinding ||
+      this.inFlightPromises.has(key)
+    )
+      throw new Error("Unknown operation or binding mismatch");
+    const before = { ...entry };
+    entry.status = "done";
+    entry.result = verifiedResult;
+    entry.at = Date.now();
+    try {
+      await this.persistNow();
+    } catch (err) {
+      this.entries.set(key, before);
       throw err;
     }
   }
-
-  /**
-   * Retrieves an entry if present and not expired.
-   */
-  public get(key: string): IdempotencyEntry | undefined {
-    this.evict();
-    const entry = this.entries.get(key);
-    if (!entry) return undefined;
-    if (Date.now() - entry.at > this.ttlMs) {
-      this.entries.delete(key);
-      return undefined;
-    }
-    return entry;
-  }
-
-  /**
-   * Returns current count of entries.
-   */
-  public get size(): number {
-    return this.entries.size;
-  }
-
-  /**
-   * Clears all stored entries (e.g. on revocation or for tests).
-   */
-  public async clear(): Promise<void> {
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-    }
+  async clear(): Promise<void> {
+    if (this.inFlightPromises.size)
+      throw new Error("Cannot clear journal while operations are in flight");
     this.entries.clear();
-    this.inFlightPromises.clear();
-    if (this.storagePath) {
-      try {
-        await fs.unlink(this.storagePath);
-      } catch (err) {
-        const code = (err as { code?: string })?.code;
-        if (code !== "ENOENT") {
-          throw err;
-        }
-      }
-    }
+    await this.persistNow();
   }
-
-  /**
-   * Evicts expired entries.
-   */
   private evict(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.entries.entries()) {
-      if (now - entry.at > this.ttlMs) {
-        this.entries.delete(key);
-        this.inFlightPromises.delete(key);
-      }
+    for (const [key, entry] of this.entries) {
+      // Unknown effects require explicit reconciliation, regardless of age.
+      if (entry.status === "done" && Date.now() - entry.at > this.ttlMs) this.entries.delete(key);
     }
   }
-
-  /**
-   * Enforces LRU capacity limit.
-   */
-  private enforceCapacity(): void {
-    while (this.entries.size > this.maxEntries) {
-      const oldestKey = this.entries.keys().next().value;
-      if (oldestKey !== undefined) {
-        this.entries.delete(oldestKey);
-        this.inFlightPromises.delete(oldestKey);
-      } else {
-        break;
+  persistNow(): Promise<void> {
+    if (!this.storagePath) return Promise.resolve();
+    const file = this.storagePath;
+    const write = async () => {
+      await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+      const temp = `${file}.tmp`;
+      const handle = await fs.open(temp, "w", 0o600);
+      try {
+        await handle.writeFile(JSON.stringify(Object.fromEntries(this.entries)), "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
       }
-    }
-  }
-
-  private schedulePersist(): void {
-    if (!this.storagePath) return;
-    if (this.saveTimer) return;
-    this.saveTimer = setTimeout(() => {
-      this.saveTimer = null;
-      void this.persistNow();
-    }, 100);
-  }
-
-  public async persistNow(): Promise<void> {
-    if (!this.storagePath) return;
-    if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = null;
-    }
-    const obj: Record<string, IdempotencyEntry> = Object.create(null) as Record<
-      string,
-      IdempotencyEntry
-    >;
-    for (const [k, v] of this.entries.entries()) {
-      if (v.status === "done") {
-        obj[k] = v;
+      await fs.rename(temp, file);
+      const dir = await fs.open(path.dirname(file), "r");
+      try {
+        await dir.sync();
+      } finally {
+        await dir.close();
       }
-    }
-    try {
-      await fs.mkdir(path.dirname(this.storagePath), { recursive: true });
-      await fs.writeFile(this.storagePath, JSON.stringify(obj, null, 2), "utf-8");
-    } catch {
-      // Ignore write errors in background persist
-    }
+    };
+    const pending = this.persistence.then(write);
+    this.persistence = pending.catch(() => {});
+    return pending;
   }
 }

@@ -7,6 +7,7 @@ import {
   Text,
   StyleSheet,
   ActivityIndicator,
+  Alert,
   ScrollView,
 } from "react-native";
 import { pickDocument, pickImage, type AttachedFile } from "../lib/attachments";
@@ -57,20 +58,24 @@ export function Composer({
     try {
       const file = await pickDocument();
       if (file) {
-        setAttachments((prev) => [...prev, file]);
+        setAttachments((prev) => (prev.length < 4 ? [...prev, file] : prev));
       }
+    } catch (err) {
+      Alert.alert("Could not attach file", err instanceof Error ? err.message : String(err));
     } finally {
       setIsPicking(false);
     }
   };
 
-  const handlePickImg = async () => {
+  const handlePickImage = async () => {
     setIsPicking(true);
     try {
-      const img = await pickImage();
-      if (img) {
-        setAttachments((prev) => [...prev, img]);
+      const image = await pickImage();
+      if (image) {
+        setAttachments((prev) => (prev.length < 4 ? [...prev, image] : prev));
       }
+    } catch (err) {
+      Alert.alert("Could not attach image", err instanceof Error ? err.message : String(err));
     } finally {
       setIsPicking(false);
     }
@@ -104,20 +109,14 @@ export function Composer({
           {AVAILABLE_MODELS.map((m) => (
             <TouchableOpacity
               key={m.id}
-              style={[
-                styles.dropdownItem,
-                selectedModel === m.id && styles.dropdownItemActive,
-              ]}
+              style={[styles.dropdownItem, selectedModel === m.id && styles.dropdownItemActive]}
               onPress={() => {
                 onModelChange(m.id);
                 setShowModelPicker(false);
               }}
             >
               <Text
-                style={[
-                  styles.dropdownText,
-                  selectedModel === m.id && styles.dropdownTextActive,
-                ]}
+                style={[styles.dropdownText, selectedModel === m.id && styles.dropdownTextActive]}
               >
                 {m.name}
               </Text>
@@ -139,10 +138,7 @@ export function Composer({
                 {att.isImage ? "📷 " : "📄 "}
                 {att.name}
               </Text>
-              <TouchableOpacity
-                onPress={() => removeAttachment(att.id)}
-                style={styles.chipRemove}
-              >
+              <TouchableOpacity onPress={() => removeAttachment(att.id)} style={styles.chipRemove}>
                 <Text style={styles.chipRemoveText}>✕</Text>
               </TouchableOpacity>
             </View>
@@ -167,11 +163,11 @@ export function Composer({
 
         {/* Attach Image Button */}
         <TouchableOpacity
-          onPress={handlePickImg}
+          onPress={handlePickImage}
           style={styles.iconButton}
           disabled={isPicking || isStreaming}
         >
-          <Text style={styles.iconText}>📷</Text>
+          <Text style={styles.iconText}>🖼️</Text>
         </TouchableOpacity>
 
         {/* Text Input */}
@@ -196,9 +192,7 @@ export function Composer({
           ]}
           activeOpacity={0.8}
         >
-          <Text style={styles.sendIcon}>
-            {isStreaming ? "⏹" : "↑"}
-          </Text>
+          <Text style={styles.sendIcon}>{isStreaming ? "⏹" : "↑"}</Text>
         </TouchableOpacity>
       </View>
     </View>

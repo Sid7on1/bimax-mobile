@@ -1,0 +1,17 @@
+{
+  "reference": "Python cryptography==50.0.2 HKDF; NIST ACVP encapsulation tcId=26",
+  "advertisement": {
+    "app": "bimax",
+    "relayUrl": "wss://relay.example/room/desktop",
+    "ref": "ref-vector",
+    "desktopDeviceId": "desktop",
+    "desktopPublicKey": "NYBy1jZYgNGu6jKa35EhODhR7SGijjt16WXQ0s0WYlQ=",
+    "cryptoVersion": 2,
+    "suite": "PQIK_MLKEM768_IKPSK0_25519_CHACHAPOLY_BLAKE2S",
+    "pqPrekeyId": "pq-independent-vector",
+    "pqPrekeyHash": "FOYerXJDSILyWrme6/h9XUp/JyGq9Mwxazq83L8azIM=",
+    "expiresAt": 4102444800000
+  },
+  "prologueSha256": "0967054f153f2f0569f70e186c84b1ab14cd89ca3c60191c7ab7826be2090935",
+  "psk": "0485d7f7a3e6cc39c4cfb0df1cac2a6d7faa9019354746b9e63d8dc74d7fd10d"
+}

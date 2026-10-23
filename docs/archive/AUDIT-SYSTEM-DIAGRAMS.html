@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bimax Audit System — HLD &amp; LLD</title>
+<style>
+  :root { --bg: #0b0e14; --card: #131722; --line: #232a3a; --txt: #e6e9f0; --dim: #9aa3b2; --acc: #6ea8fe; --grn: #3fb950; --amb: #d29922; --red: #f85149; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--txt); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, Helvetica, Arial, sans-serif; padding: 40px 24px 80px; }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.5px; }
+  .sub { color: var(--dim); margin-top: 8px; font-size: 15px; }
+  h2 { font-size: 21px; margin: 48px 0 6px; font-weight: 700; }
+  h2 .tag { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: 1.5px; padding: 4px 10px; border-radius: 20px; margin-right: 10px; vertical-align: 2px; }
+  .hld .tag { background: rgba(110,168,254,.15); color: var(--acc); border: 1px solid rgba(110,168,254,.4); }
+  .lld .tag { background: rgba(63,185,80,.12); color: var(--grn); border: 1px solid rgba(63,185,80,.4); }
+  .cap { color: var(--dim); font-size: 14px; margin-bottom: 16px; max-width: 900px; line-height: 1.55; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 24px; margin-bottom: 28px; overflow-x: auto; }
+  .card h3 { font-size: 15px; margin-bottom: 14px; color: var(--txt); font-weight: 600; }
+  .mermaid { display: flex; justify-content: center; }
+  table.sev { border-collapse: collapse; width: 100%; max-width: 720px; font-size: 14px; }
+  table.sev th, table.sev td { border: 1px solid var(--line); padding: 10px 14px; text-align: center; }
+  table.sev th { background: #1a2030; color: var(--dim); font-weight: 600; }
+  table.sev td.crit { background: rgba(248,81,73,.18); color: #ff9d97; font-weight: 700; }
+  table.sev td.high { background: rgba(210,153,34,.16); color: #e8b93e; font-weight: 700; }
+  table.sev td.med { background: rgba(110,168,254,.12); color: #9cc0fe; font-weight: 600; }
+  table.sev td.low { color: var(--dim); }
+  .note { margin-top: 14px; font-size: 13px; color: var(--dim); line-height: 1.6; }
+  .note b { color: var(--txt); }
+  footer { margin-top: 56px; color: var(--dim); font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Audit System — Design Diagrams</h1>
+<p class="sub">The machine behind <b>AUDIT-2.md</b>: how audit rounds are built, deduplicated, and turned into verified fixes.</p>
+
+<div class="hld">
+<h2><span class="tag">HLD</span>System overview — components &amp; data flow</h2>
+<p class="cap">One picture of the whole machine. Sid requests a round; the orchestrator assembles a prompt from three inputs (methodology library, findings registry, scope + playbook); specialist agents audit in parallel; findings are deduplicated against the registry, synthesized into a report, and fed to the fix pipeline.</p>
+<div class="card">
+<div class="mermaid">
+flowchart TB
+    Sid([Sid]) -->|audit request| Orch[Orchestrator<br/>Muse]
+    subgraph IN [Prompt inputs]
+        direction LR
+        ML[(Methodology<br/>Library)]
+        REG[(Findings<br/>Registry)]
+        SP[Scope +<br/>Attack Playbook]
+    end
+    Orch --> ML & REG & SP
+    ML --> P
+    REG --> P
+    SP --> P
+    P[Round Prompt<br/>AUDIT-N.md]
+    subgraph AG [Audit agents — one per component]
+        direction LR
+        AM[Agent:<br/>Mobile]
+        GW[Agent:<br/>Gateway]
+        RS[Agent:<br/>Responder + Relays]
+        SC[Agent:<br/>Supply chain]
+    end
+    P --> AM & GW & RS & SC
+    AM & GW & RS & SC --> DS[Dedup +<br/>Synthesis]
+    DS --> RPT[Report<br/>artifacts/audit/]
+    RPT --> REG
+    RPT --> FIX[Fix pipeline<br/>FIX-N.md]
+    FIX --> VER[Verifier<br/>re-runs PoC]
+    VER -->|verified| REG
+    VER -->|still reproduces| FIX
+    style Sid fill:#1c2b4a,stroke:#6ea8fe,color:#fff
+    style P fill:#1c2b4a,stroke:#6ea8fe,color:#fff
+    style REG fill:#3a2b12,stroke:#d29922,color:#fff
+    style DS fill:#12331f,stroke:#3fb950,color:#fff
+</div>
+</div>
+</div>
+
+<div class="lld">
+<h2><span class="tag">LLD</span>Internals</h2>
+<p class="cap">How the machine actually works inside: the finding lifecycle, the dedup decision tree, prompt assembly order, the finding record schema, and the severity matrix.</p>
+
+<div class="card">
+<h3>1 — Finding lifecycle (state machine)</h3>
+<div class="mermaid">
+stateDiagram-v2
+    [*] --> open : filed by agent
+    open --> fixing : fix started
+    open --> wontfix : accepted risk
+    fixing --> fixed : PoC no longer reproduces
+    fixing --> fixing : PoC still reproduces
+    fixed --> verified : independent re-run passes
+    fixed --> fixing : verifier rejects
+    verified --> [*]
+    wontfix --> [*]
+</div>
+<p class="note"><b>Rule:</b> a finding only closes at <b>verified</b> — "fix written" is not done. Registry history is append-only; statuses change, past entries never do.</p>
+</div>
+
+<div class="card">
+<h3>2 — Dedup decision tree (walk in order)</h3>
+<div class="mermaid">
+flowchart TD
+    S([Candidate finding]) --> Q1{"Same file:line<br/>AND same root cause?"}
+    Q1 -->|yes| D1[DUPLICATE<br/>cite existing ID — drop]
+    Q1 -->|no| Q2{"Same root cause<br/>different file?"}
+    Q2 -->|yes| N1[NEW — same class<br/>cross-reference both]
+    Q2 -->|no| Q3{"Same file<br/>different cause?"}
+    Q3 -->|yes| N2[NEW finding]
+    Q3 -->|no| Q4{"Chains 2+ known<br/>findings?"}
+    Q4 -->|yes| N3[NEW — chain<br/>cite component IDs]
+    Q4 -->|no| Q5{"Old entry says<br/>remediated?"}
+    Q5 -->|yes| V{"Verify on<br/>current code"}
+    V -->|still present| N4[NEW — regression]
+    V -->|fixed| U[Update old status<br/>file nothing]
+    Q5 -->|no| N5[NEW — assign next ID]
+    style D1 fill:#3a1414,stroke:#f85149,color:#fff
+    style N1 fill:#12331f,stroke:#3fb950,color:#fff
+    style N2 fill:#12331f,stroke:#3fb950,color:#fff
+    style N3 fill:#12331f,stroke:#3fb950,color:#fff
+    style N4 fill:#12331f,stroke:#3fb950,color:#fff
+    style N5 fill:#12331f,stroke:#3fb950,color:#fff
+</div>
+<p class="note"><b>Why step 2 exists:</b> "no TLS enforcement" was found on the mobile relay client <i>and</i> the responder relay client — one entry would have left one side unfixed. Same class, two findings, cross-referenced.</p>
+</div>
+
+<div class="card">
+<h3>3 — Prompt assembly pipeline (order matters)</h3>
+<div class="mermaid">
+flowchart LR
+    B[Background<br/>you are round N] --> K[Known findings<br/>duplicate shield]
+    K --> O[Objective<br/>min 10 novel]
+    O --> M[Methodology<br/>named frameworks]
+    M --> SC[Scope<br/>exact file lists]
+    SC --> PB[Attack playbook<br/>fuzz / race / chain]
+    PB --> R[Rules<br/>evidence standards]
+    R --> F[Output format<br/>finding schema]
+    F --> A[Acceptance<br/>pass-fail gates]
+    A --> PR([AUDIT-N.md])
+    style PR fill:#1c2b4a,stroke:#6ea8fe,color:#fff
+</div>
+<p class="note">Each section narrows the agent's freedom. By <b>Acceptance</b> there is exactly one way to succeed — novelty is enforced structurally, not hoped for.</p>
+</div>
+
+<div class="card">
+<h3>4 — Finding record schema</h3>
+<div class="mermaid">
+classDiagram
+    class Finding {
+        +string id
+        +Severity severity
+        +string framework
+        +string file
+        +Component component
+        +string novelty
+        +string attack_scenario
+        +string poc
+        +string impact
+        +string fix
+        +Status status
+        +string round
+        +string date
+    }
+    class Severity {
+        <<enumeration>>
+        Critical
+        High
+        Medium
+        Low
+    }
+    class Status {
+        <<enumeration>>
+        open
+        fixing
+        fixed
+        verified
+        wontfix
+    }
+    class Component {
+        <<enumeration>>
+        mobile
+        gateway
+        responder
+        relay
+        protocol
+        config
+        supply_chain
+    }
+    Finding --> Severity
+    Finding --> Status
+    Finding --> Component
+</div>
+</div>
+
+<div class="card">
+<h3>5 — Severity matrix (impact × likelihood — no gut feel)</h3>
+<table class="sev">
+<tr><th></th><th>Likelihood: High</th><th>Medium</th><th>Low</th></tr>
+<tr><th>Impact: Critical</th><td class="crit">Critical</td><td class="crit">Critical</td><td class="high">High</td></tr>
+<tr><th>Impact: High</th><td class="crit">Critical</td><td class="high">High</td><td class="med">Medium</td></tr>
+<tr><th>Impact: Medium</th><td class="high">High</td><td class="med">Medium</td><td class="low">Low</td></tr>
+<tr><th>Impact: Low</th><td class="med">Medium</td><td class="low">Low</td><td class="low">Low</td></tr>
+</table>
+<p class="note"><b>Impact:</b> Critical = RCE / unbounded fund drain / account takeover at scale. High = ~₹3,000/burst drain, impersonation, single-key RCE. <b>Likelihood:</b> High = unauthenticated remote or trivial; Medium = one user interaction; Low = physical access or stacked preconditions.<br><b>Example:</b> BMA-01 (no max_tokens cap) = High impact × High likelihood → <b>Critical</b> by matrix. It was filed as High — the auditors under-scored by one notch.</p>
+</div>
+
+</div>
+
+<footer>Bimax audit system · round 3 PROMPTED · AUDIT-SYSTEM-DESIGN.md has the full text spec</footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { primaryBorderColor: '#6ea8fe' }, flowchart: { curve: 'basis' } });</script>
+</body>
+</html>

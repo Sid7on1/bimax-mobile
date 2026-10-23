@@ -1,0 +1,17 @@
+{
+  "target": "--local",
+  "receipt": {
+    "request_id": "billing-cli-fixture",
+    "provider_request_id": "synthetic-provider-fixture",
+    "operator": "local-test",
+    "reason": "Synthetic fixture only; no real provider evidence",
+    "evidence_sha256": "fdee9dd9a6b6cad0f473d97ea95bc1a4f50217e44e55dd378c281d7d669b4cb0",
+    "verified_at": "2026-10-16T17:36:05.093Z",
+    "old_prompt_tokens": 200,
+    "old_completion_tokens": 0,
+    "old_cost_microusd": 300,
+    "prompt_tokens": 10,
+    "completion_tokens": 5,
+    "cost_microusd": 20
+  }
+}

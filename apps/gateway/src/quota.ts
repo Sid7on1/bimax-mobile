@@ -49,6 +49,36 @@ export async function checkQuota(
 ): Promise<QuotaStatus> {
   const { startOfMonthISO, resetAtISO } = getMonthWindowUTC(now);
 
+  // Explicit entitlement is required; absence never grants provider access.
+  try {
+    const entitlement = await db
+      .prepare("SELECT status, expires_at FROM entitlements WHERE user_id = ?")
+      .bind(userId)
+      .first<{ status: string; expires_at: string }>();
+    if (
+      !entitlement ||
+      entitlement.status !== "active" ||
+      !Number.isFinite(Date.parse(entitlement.expires_at)) ||
+      Date.parse(entitlement.expires_at) <= now.getTime()
+    ) {
+      return {
+        allowed: false,
+        tokensUsed: 0,
+        tokenBudget: 0,
+        resetAt: resetAtISO,
+        error: "exceeded",
+      };
+    }
+  } catch {
+    return {
+      allowed: false,
+      tokensUsed: 0,
+      tokenBudget: 0,
+      resetAt: resetAtISO,
+      error: "unavailable",
+    };
+  }
+
   // Determine user's monthly token budget fallback
   let budget = DEFAULT_BUDGET_TOKENS;
   if (env.DEFAULT_MONTHLY_TOKENS) {
@@ -83,9 +113,7 @@ export async function checkQuota(
   let tokensUsed = 0;
   try {
     const usageRow = await db
-      .prepare(
-        "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) as total FROM usage WHERE user_id = ? AND created_at >= ?",
-      )
+      .prepare("SELECT tokens AS total FROM budget_totals WHERE user_id=? AND month=?")
       .bind(userId, startOfMonthISO)
       .first<{ total: number }>();
 

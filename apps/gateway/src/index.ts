@@ -1,14 +1,11 @@
+import { mintRelayTicket, removeRelayRoom } from "./relay-ticket";
 // src/index.ts
 import { verifyAuth, type Env } from "./auth";
-import {
-  parseAllowedModels,
-  isModelAllowed,
-  sanitizeRequestBody,
-  fetchUpstream,
-} from "./providers";
+import { parseAllowedModels, isModelAllowed, fetchUpstream } from "./providers";
 import { checkQuota } from "./quota";
-import { checkRateLimit } from "./ratelimit";
-import { recordUsage } from "./metering";
+import { getMinuteBucketUTC, checkRateLimit } from "./ratelimit";
+import { reserve, settle, finalizeExpired } from "./admission";
+import { readBoundedJson, validateChat } from "./validation";
 
 export { Env };
 
@@ -44,16 +41,48 @@ export function errorResponse(
  * CORS handling: reflect request Origin for web/Expo clients with scheme validation.
  * PROMPT-18 note: PROMPT-18 will pin the production Origin allowlist.
  */
-export function getCorsHeaders(request: Request): Record<string, string> {
+export function getCorsHeaders(request: Request, env?: Env): Record<string, string> {
   const origin = request.headers.get("Origin");
-  const isValidOrigin =
-    origin && /^(https?:\/\/|exp:\/\/|exps:\/\/)/.test(origin);
+  const isValidOrigin = origin && (env?.ALLOWED_ORIGINS ?? "").split(",").includes(origin);
   return {
-    "Access-Control-Allow-Origin": isValidOrigin ? origin : "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    ...(isValidOrigin ? { "Access-Control-Allow-Origin": origin } : {}),
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Max-Age": "86400",
+    Vary: "Origin",
   };
+}
+
+function parseSSEUsageLine(
+  line: string,
+  requireSafeInteger: boolean,
+): { promptTokens: number; completionTokens: number } | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("data:") || trimmed === "data: [DONE]") return null;
+  const jsonStr = trimmed.slice(5).trim();
+  if (!jsonStr) return null;
+  try {
+    const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && parsed.usage) {
+      const u = parsed.usage as Record<string, unknown>;
+      if (requireSafeInteger) {
+        if (!Number.isSafeInteger(u.prompt_tokens) || !Number.isSafeInteger(u.completion_tokens)) {
+          return null;
+        }
+        return {
+          promptTokens: u.prompt_tokens as number,
+          completionTokens: u.completion_tokens as number,
+        };
+      }
+      return {
+        promptTokens: Number(u.prompt_tokens) || 0,
+        completionTokens: Number(u.completion_tokens) || 0,
+      };
+    }
+  } catch {
+    // Ignore non-JSON data lines
+  }
+  return null;
 }
 
 /**
@@ -71,22 +100,11 @@ export async function extractUsageFromSSE(
   let foundUsage = false;
 
   const processLine = (line: string) => {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("data:") && trimmed !== "data: [DONE]") {
-      const jsonStr = trimmed.slice(5).trim();
-      if (jsonStr) {
-        try {
-          const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-          if (parsed && typeof parsed === "object" && parsed.usage) {
-            const u = parsed.usage as Record<string, unknown>;
-            promptTokens = Number(u.prompt_tokens) || 0;
-            completionTokens = Number(u.completion_tokens) || 0;
-            foundUsage = true;
-          }
-        } catch {
-          // Ignore non-JSON data lines
-        }
-      }
+    const u = parseSSEUsageLine(line, false);
+    if (u) {
+      promptTokens = u.promptTokens;
+      completionTokens = u.completionTokens;
+      foundUsage = true;
     }
   };
 
@@ -119,12 +137,17 @@ export async function extractUsageFromSSE(
 }
 
 export default {
-  async fetch(
-    request: Request,
-    env: Env,
-    ctx?: ExecutionContext,
-  ): Promise<Response> {
-    const corsHeaders = getCorsHeaders(request);
+  scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(finalizeExpired(env));
+    ctx.waitUntil(
+      env.DB.prepare("DELETE FROM rate_limits WHERE bucket < ?")
+        .bind(getMinuteBucketUTC(new Date(Date.now() - 48 * 3600_000)))
+        .run(),
+    );
+  },
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+    const corsHeaders = getCorsHeaders(request, env);
+    corsHeaders["X-Request-Id"] = crypto.randomUUID();
 
     // 1. CORS Preflight
     if (request.method === "OPTIONS") {
@@ -136,6 +159,31 @@ export default {
 
     const url = new URL(request.url);
 
+    if (url.pathname === "/ready" && request.method === "GET") {
+      try {
+        const prices = JSON.parse(env.MODEL_PRICES_JSON ?? "{}");
+        const configured = parseAllowedModels(env.ALLOWED_MODELS).every(
+          (model) =>
+            prices[model] &&
+            Number.isSafeInteger(prices[model].input) &&
+            Number.isSafeInteger(prices[model].output),
+        );
+        const control = await env.DB.prepare(
+          "SELECT paused FROM billing_control WHERE id=1",
+        ).first<{ paused: number }>();
+        await env.DB.prepare("SELECT hello_pubkey FROM relay_devices LIMIT 1").first();
+        await env.DB.prepare("SELECT updated_at FROM relay_rooms LIMIT 1").first();
+        const ok =
+          configured &&
+          Number(env.GLOBAL_MONTHLY_MICROUSD) > 0 &&
+          !!env.SUPABASE_URL &&
+          (env.RELAY_TICKET_SECRET?.length ?? 0) >= 32 &&
+          control?.paused === 0;
+        return Response.json({ ok }, { status: ok ? 200 : 503 });
+      } catch {
+        return Response.json({ ok: false }, { status: 503 });
+      }
+    }
     // 2. Health check endpoint (No auth)
     if (url.pathname === "/health" && request.method === "GET") {
       return new Response(JSON.stringify({ ok: true }), {
@@ -147,6 +195,84 @@ export default {
       });
     }
 
+    if (url.pathname.startsWith("/v1/relay-rooms") && ["GET", "DELETE"].includes(request.method)) {
+      const auth = await verifyAuth(request, env);
+      if (!auth)
+        return errorResponse(
+          "Authentication required",
+          401,
+          "authentication_error",
+          "invalid_api_key",
+          corsHeaders,
+        );
+      const limit = await checkRateLimit(auth.userId, env);
+      if (!limit.allowed)
+        return errorResponse(
+          "Room management unavailable or rate limited",
+          limit.unavailable ? 503 : 429,
+          "requests",
+          limit.unavailable ? "admission_unavailable" : "rate_limit_exceeded",
+          corsHeaders,
+        );
+      try {
+        if (request.method === "GET" && url.pathname === "/v1/relay-rooms") {
+          const rows = await env.DB.prepare(
+            "SELECT room_id,updated_at FROM relay_rooms WHERE user_id=? ORDER BY updated_at DESC",
+          )
+            .bind(auth.userId)
+            .all();
+          return Response.json({ rooms: rows.results }, { headers: corsHeaders });
+        }
+        if (
+          request.method === "DELETE" &&
+          /^\/v1\/relay-rooms\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)
+        ) {
+          await removeRelayRoom(env, auth.userId, url.pathname.split("/").pop()!);
+          return new Response(null, { status: 204, headers: corsHeaders });
+        }
+        return errorResponse("Not found", 404, "invalid_request_error", "not_found", corsHeaders);
+      } catch {
+        return errorResponse(
+          "Room management unavailable",
+          503,
+          "server_error",
+          "room_management_unavailable",
+          corsHeaders,
+        );
+      }
+    }
+    if (url.pathname === "/v1/relay-ticket" && request.method === "POST") {
+      const auth = await verifyAuth(request, env);
+      if (!auth)
+        return errorResponse(
+          "Authentication required",
+          401,
+          "authentication_error",
+          "invalid_api_key",
+          corsHeaders,
+        );
+      const limit = await checkRateLimit(auth.userId, env);
+      if (!limit.allowed)
+        return errorResponse(
+          "Admission unavailable or rate limited",
+          limit.unavailable ? 503 : 429,
+          "requests",
+          limit.unavailable ? "admission_unavailable" : "rate_limit_exceeded",
+          corsHeaders,
+        );
+      try {
+        const ticket = await mintRelayTicket(env, auth.userId, await readBoundedJson(request));
+        return Response.json({ ticket }, { headers: corsHeaders });
+      } catch {
+        return errorResponse(
+          "Relay access unavailable for this room",
+          403,
+          "permission_error",
+          "relay_access_denied",
+          corsHeaders,
+        );
+      }
+    }
     // 3. Usage check endpoint (Auth required)
     if (url.pathname === "/v1/usage" && request.method === "GET") {
       const auth = await verifyAuth(request, env);
@@ -192,13 +318,13 @@ export default {
       }
 
       // Step B: Per-minute Rate Limit
-      const rateLimit = await checkRateLimit(auth.keyHash, env);
+      const rateLimit = await checkRateLimit(auth.userId, env);
       if (!rateLimit.allowed) {
         return errorResponse(
-          "Rate limit exceeded",
-          429,
+          rateLimit.unavailable ? "Admission temporarily unavailable" : "Rate limit exceeded",
+          rateLimit.unavailable ? 503 : 429,
           "requests",
-          "rate_limit_exceeded",
+          rateLimit.unavailable ? "admission_unavailable" : "rate_limit_exceeded",
           {
             ...corsHeaders,
             "Retry-After": String(rateLimit.retryAfter || 60),
@@ -206,31 +332,10 @@ export default {
         );
       }
 
-      // Step C: Monthly Quota Enforcement (BEFORE provider call)
-      const quota = await checkQuota(env.DB, auth.userId, env);
-      if (!quota.allowed) {
-        if (quota.error === "unavailable") {
-          return errorResponse(
-            "Usage check temporarily unavailable — try again shortly",
-            429,
-            "insufficient_quota",
-            "quota_unavailable",
-            corsHeaders,
-          );
-        }
-        return errorResponse(
-          "Monthly token quota exceeded",
-          429,
-          "insufficient_quota",
-          "quota_exceeded",
-          corsHeaders,
-        );
-      }
-
-      // Step D: Parse and validate JSON body
+      // Step C: Parse and validate JSON body (quota, entitlement, and spend limits are atomically enforced in reserve() below)
       let rawBody: Record<string, unknown>;
       try {
-        rawBody = (await request.json()) as Record<string, unknown>;
+        rawBody = await readBoundedJson(request);
       } catch {
         return errorResponse(
           "Invalid JSON request body",
@@ -272,14 +377,87 @@ export default {
         );
       }
 
-      // Step E: Sanitize request (strip client keys/URLs, inject include_usage if streaming)
-      const sanitized = sanitizeRequestBody(rawBody);
+      // Step D: Sanitize request (strip client keys/URLs, inject include_usage if streaming)
+      let sanitized;
+      try {
+        sanitized = validateChat(rawBody, env);
+      } catch (err) {
+        return errorResponse(
+          err instanceof Error ? err.message : "Invalid request",
+          400,
+          "invalid_request_error",
+          "invalid_body",
+          corsHeaders,
+        );
+      }
+      let reservation;
+      try {
+        reservation = await reserve(env, auth.userId, sanitized, corsHeaders["X-Request-Id"]);
+      } catch {
+        return errorResponse(
+          "Billing admission unavailable",
+          503,
+          "server_error",
+          "admission_unavailable",
+          corsHeaders,
+        );
+      }
+      if (!reservation)
+        return errorResponse(
+          "Request exceeds available allocation",
+          429,
+          "insufficient_quota",
+          "quota_exceeded",
+          corsHeaders,
+        );
+      const abort = new AbortController();
+      const deadline = setTimeout(() => abort.abort(), 120_000);
+      const cancel = () => abort.abort();
+      request.signal.addEventListener("abort", cancel, { once: true });
+      if (request.signal.aborted) abort.abort();
+      const cleanup = () => {
+        clearTimeout(deadline);
+        request.signal.removeEventListener("abort", cancel);
+      };
+      // Settlement failures retain the write-ahead reservation and never grant free usage.
+      const charge = async (usage: {
+        promptTokens: number;
+        completionTokens: number;
+        usageMissing: boolean;
+        rejected?: boolean;
+      }) => {
+        try {
+          await settle(env, reservation, usage);
+        } catch {
+          console.error("Settlement pending reconciliation", reservation.id);
+        }
+      };
 
       // Step F: Dispatch upstream
       // Note: fetchUpstream pre-scrubs raw upstream failures to a 502 with an OpenAI-shaped body.
       // This branch re-attaches CORS headers before returning the scrubbed error to the client.
-      const upstreamRes = await fetchUpstream(sanitized, env);
+      let upstreamRes: Response;
+      try {
+        upstreamRes = await fetchUpstream(sanitized, env, abort.signal);
+      } catch {
+        await charge({ promptTokens: 0, completionTokens: 0, usageMissing: true });
+        cleanup();
+        return errorResponse(
+          "Provider dispatch unavailable",
+          502,
+          "upstream_error",
+          "bad_gateway",
+          corsHeaders,
+        );
+      }
       if (!upstreamRes.ok) {
+        await charge({
+          promptTokens: 0,
+          completionTokens: 0,
+          usageMissing: true,
+          rejected: upstreamRes.headers.get("X-Bimax-Not-Generated") === "1",
+        });
+        cleanup();
         const errJson = await upstreamRes.text();
         return new Response(errJson, {
           status: upstreamRes.status,
@@ -292,25 +470,51 @@ export default {
 
       // Step G: Handle Streaming vs Non-streaming
       if (sanitized.stream && upstreamRes.body) {
-        // Tee stream: one pipe for client, one for usage extraction
-        const [clientStream, usageStream] = upstreamRes.body.tee();
-
-        const writePromise = (async () => {
-          const usageInfo = await extractUsageFromSSE(usageStream);
-          await recordUsage(env.DB, {
-            userId: auth.userId,
-            model: sanitized.model,
-            promptTokens: usageInfo.promptTokens,
-            completionTokens: usageInfo.completionTokens,
-            usageMissing: usageInfo.usageMissing,
-          });
-        })();
-
-        if (ctx && typeof ctx.waitUntil === "function") {
-          ctx.waitUntil(writePromise);
-        } else {
-          void writePromise;
-        }
+        const reader = upstreamRes.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let usage = { promptTokens: 0, completionTokens: 0, usageMissing: true };
+        const consume = (line: string) => {
+          const parsedUsage = parseSSEUsageLine(line, true);
+          if (parsedUsage) {
+            usage = {
+              promptTokens: parsedUsage.promptTokens,
+              completionTokens: parsedUsage.completionTokens,
+              usageMissing: false,
+            };
+          }
+        };
+        const clientStream = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            try {
+              const { done, value } = await reader.read();
+              if (done) {
+                consume(buffer);
+                await charge(usage);
+                cleanup();
+                controller.close();
+                return;
+              }
+              buffer += decoder.decode(value, { stream: true });
+              if (buffer.length > 1024 * 1024) throw new Error("Upstream SSE event too large");
+              const lines = buffer.split("\n");
+              buffer = lines.pop() ?? "";
+              lines.forEach(consume);
+              controller.enqueue(value);
+            } catch (err) {
+              await charge(usage);
+              cleanup();
+              abort.abort();
+              controller.error(err);
+            }
+          },
+          async cancel() {
+            await charge(usage);
+            cleanup();
+            abort.abort();
+            await reader.cancel().catch(() => {});
+          },
+        });
 
         return new Response(clientStream, {
           status: 200,
@@ -327,7 +531,11 @@ export default {
       let data: Record<string, unknown>;
       try {
         data = (await upstreamRes.json()) as Record<string, unknown>;
-      } catch (_err) {
+        if (!data || typeof data !== "object") throw new Error("Invalid upstream response");
+        cleanup();
+      } catch {
+        await charge({ promptTokens: 0, completionTokens: 0, usageMissing: true });
+        cleanup();
         return errorResponse(
           "Upstream provider error",
           502,
@@ -338,26 +546,16 @@ export default {
       }
 
       const usageObj = data.usage as
-        | { prompt_tokens?: number; completion_tokens?: number }
-        | undefined;
+        { prompt_tokens?: number; completion_tokens?: number } | undefined;
 
       const promptTokens = Number(usageObj?.prompt_tokens) || 0;
       const completionTokens = Number(usageObj?.completion_tokens) || 0;
-      const usageMissing = !usageObj;
+      const usageMissing =
+        !usageObj ||
+        !Number.isSafeInteger(usageObj.prompt_tokens) ||
+        !Number.isSafeInteger(usageObj.completion_tokens);
 
-      const writePromise = recordUsage(env.DB, {
-        userId: auth.userId,
-        model: sanitized.model,
-        promptTokens,
-        completionTokens,
-        usageMissing,
-      });
-
-      if (ctx && typeof ctx.waitUntil === "function") {
-        ctx.waitUntil(writePromise);
-      } else {
-        void writePromise;
-      }
+      await charge({ promptTokens, completionTokens, usageMissing });
 
       return new Response(JSON.stringify(data), {
         status: 200,
@@ -368,12 +566,6 @@ export default {
       });
     }
 
-    return errorResponse(
-      "Not Found",
-      404,
-      "invalid_request_error",
-      "not_found",
-      corsHeaders,
-    );
+    return errorResponse("Not Found", 404, "invalid_request_error", "not_found", corsHeaders);
   },
 };

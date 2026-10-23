@@ -1,5 +1,6 @@
 // src/providers.ts
 import type { Env } from "./auth";
+import { validateChat } from "./validation";
 
 export const DEFAULT_ALLOWED_MODELS = "deepseek-chat,qwen-plus,qwen-turbo";
 
@@ -11,7 +12,7 @@ export const UPSTREAM_ENDPOINTS: Record<string, string> = {
 
 export interface ChatCompletionRequest {
   model: string;
-  messages: Array<{ role: string; content: unknown; [key: string]: unknown }>;
+  messages: { role: string; content: unknown; [key: string]: unknown }[];
   stream?: boolean;
   stream_options?: { include_usage?: boolean };
   temperature?: number;
@@ -29,7 +30,7 @@ export function parseAllowedModels(envAllowed?: string): string[] {
 }
 
 export function isModelAllowed(model: string, allowedModels: string[]): boolean {
-  return allowedModels.includes(model.toLowerCase());
+  return allowedModels.includes(model.trim().toLowerCase());
 }
 
 export interface UpstreamConfig {
@@ -76,27 +77,12 @@ export function resolveUpstream(model: string, env: Env): UpstreamConfig {
  * Sanitizes the request payload, stripping client-supplied URLs and keys,
  * and ensuring stream_options.include_usage is present when streaming.
  */
-export function sanitizeRequestBody(body: Record<string, unknown>): ChatCompletionRequest {
-  const {
-    base_url: _b1,
-    baseUrl: _b2,
-    api_key: _k1,
-    apiKey: _k2,
-    headers: _h,
-    authorization: _a,
-    ...clean
-  } = body;
-
-  const req = clean as unknown as ChatCompletionRequest;
-
-  if (req.stream) {
-    req.stream_options = {
-      ...(req.stream_options ?? {}),
-      include_usage: true,
-    };
-  }
-
-  return req;
+export function sanitizeRequestBody(
+  body: Record<string, unknown>,
+  env: Pick<Env, "MAX_OUTPUT_TOKENS"> = {},
+): ChatCompletionRequest {
+  // Keep compatibility callers on the same capped, allowlisted path as the HTTP endpoint.
+  return validateChat(body, env);
 }
 
 /**
@@ -112,7 +98,9 @@ export function createMockUpstreamResponse(req: ChatCompletionRequest): Response
         object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
         model: req.model,
-        choices: [{ index: 0, delta: { role: "assistant", content: "Hello" }, finish_reason: null }],
+        choices: [
+          { index: 0, delta: { role: "assistant", content: "Hello" }, finish_reason: null },
+        ],
       })}\n\n`,
       `data: ${JSON.stringify({
         id,
@@ -185,6 +173,7 @@ export function createMockUpstreamResponse(req: ChatCompletionRequest): Response
 export async function fetchUpstream(
   req: ChatCompletionRequest,
   env: Env,
+  signal?: AbortSignal,
 ): Promise<Response> {
   if (
     env.MOCK_UPSTREAM === "1" ||
@@ -205,7 +194,10 @@ export async function fetchUpstream(
           code: "missing_provider_key",
         },
       }),
-      { status: 502, headers: { "Content-Type": "application/json" } },
+      {
+        status: 502,
+        headers: { "Content-Type": "application/json", "X-Bimax-Not-Generated": "1" },
+      },
     );
   }
 
@@ -218,8 +210,9 @@ export async function fetchUpstream(
         Authorization: `Bearer ${upstream.apiKey}`,
       },
       body: JSON.stringify(req),
+      signal,
     });
-  } catch (err) {
+  } catch {
     console.error(`[upstream] ${upstream.provider} failed: network error`);
     return new Response(
       JSON.stringify({
@@ -243,7 +236,13 @@ export async function fetchUpstream(
           code: "bad_gateway",
         },
       }),
-      { status: 502, headers: { "Content-Type": "application/json" } },
+      {
+        status: 502,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Bimax-Not-Generated": upstreamRes.status < 500 ? "1" : "0",
+        },
+      },
     );
   }
 

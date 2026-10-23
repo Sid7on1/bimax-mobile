@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-16",
+  "status": "remote-migrations-applied-and-verified",
+  "backupPath": "artifacts/private-release/gateway-before-migrations-2026-10-16.sql",
+  "backupSha256": "0062f8657e4b7bda483811a88b68a0b81d8b35fd2ff8f72afa2aed35e49c133d",
+  "backupBytes": 4842,
+  "backupMode": "0600",
+  "restoredIntegrity": "ok",
+  "stagingMigrations": [
+    "0001_baseline.sql",
+    "0002_production_admission.sql",
+    "0003_atomic_budget_totals.sql",
+    "0004_security_lifecycle.sql"
+  ],
+  "historicalRows": {
+    "usage": 19,
+    "quotas": 0
+  },
+  "historicalRowsUnchanged": true,
+  "remoteMigrationsApplied": true,
+  "remoteVerification": {
+    "pendingMigrations": 0,
+    "usageRows": 19,
+    "requiredTablesPresent": ["reservations", "budget_totals", "relay_devices"],
+    "reconciliationTriggerPresent": true
+  },
+  "workerCodeDeployed": false
+}

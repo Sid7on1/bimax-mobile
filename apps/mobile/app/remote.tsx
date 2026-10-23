@@ -36,6 +36,7 @@ export default function RemoteScreen() {
   const router = useRouter();
   const {
     status,
+    connectionError,
     trustedDesktop,
     sessions,
     pendingApprovals,
@@ -68,10 +69,7 @@ export default function RemoteScreen() {
       return;
     }
     const updateDiff = () => {
-      const diff = Math.max(
-        0,
-        Math.floor((Date.now() - agentStatus.updatedAt) / 1000),
-      );
+      const diff = Math.max(0, Math.floor((Date.now() - agentStatus.updatedAt) / 1000));
       setSecondsAgo(diff);
     };
     updateDiff();
@@ -79,7 +77,7 @@ export default function RemoteScreen() {
     return () => clearInterval(interval);
   }, [agentStatus]);
 
-  const handleSendInstruction = () => {
+  const handleSendInstruction = async () => {
     setComposerError("");
     if (!instructionText.trim()) {
       setComposerError("Instruction cannot be empty.");
@@ -91,37 +89,31 @@ export default function RemoteScreen() {
     }
 
     try {
-      sendInstruction(instructionText);
+      await sendInstruction(instructionText);
       setInstructionText("");
     } catch (err) {
-      setComposerError(
-        err instanceof Error ? err.message : "Failed to send instruction",
-      );
+      setComposerError(err instanceof Error ? err.message : "Failed to send instruction");
     }
   };
 
   const handleKillPress = () => {
-    Alert.alert(
-      "Kill agent?",
-      "This immediately stops the desktop agent.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Kill",
-          style: "destructive",
-          onPress: () => {
-            try {
-              sendKill("user requested from phone");
-            } catch (err) {
-              Alert.alert(
-                "Couldn't send kill signal",
-                err instanceof Error ? err.message : "Not connected",
-              );
-            }
-          },
+    Alert.alert("Kill agent?", "This immediately stops the desktop agent.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Kill",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await sendKill("user requested from phone");
+          } catch (err) {
+            Alert.alert(
+              "Couldn't send kill signal",
+              err instanceof Error ? err.message : "Not connected",
+            );
+          }
         },
-      ],
-    );
+      },
+    ]);
   };
 
   const agentState: AgentState | "unknown" = agentStatus?.state ?? "unknown";
@@ -141,9 +133,7 @@ export default function RemoteScreen() {
             <View
               style={[
                 styles.statusDot,
-                status === "online"
-                  ? styles.statusDotOnline
-                  : styles.statusDotOffline,
+                status === "online" ? styles.statusDotOnline : styles.statusDotOffline,
               ]}
             />
             <Text style={styles.statusText}>{status}</Text>
@@ -158,17 +148,23 @@ export default function RemoteScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
+        {connectionError && (
+          <View style={styles.pairCard}>
+            <Text style={styles.cardTitle}>Secure connection needs attention</Text>
+            <Text style={styles.cardBody}>{connectionError}</Text>
+            <TouchableOpacity style={styles.primaryButton} onPress={() => router.push("/pair")}>
+              <Text style={styles.primaryButtonText}>Scan Desktop QR</Text>
+            </TouchableOpacity>
+          </View>
+        )}
         {isNoTrustedDesktop && (
           <View style={styles.pairCard}>
             <Text style={styles.cardTitle}>No Paired Desktop</Text>
             <Text style={styles.cardBody}>
-              Pair this mobile remote with your Bimax desktop app to control
-              agents, approve tools, and view live sessions.
+              Pair this mobile remote with your Bimax desktop app to control agents, approve tools,
+              and view live sessions.
             </Text>
-            <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={() => router.push("/pair")}
-            >
+            <TouchableOpacity style={styles.primaryButton} onPress={() => router.push("/pair")}>
               <Text style={styles.primaryButtonText}>Pair a Desktop</Text>
             </TouchableOpacity>
           </View>
@@ -178,17 +174,14 @@ export default function RemoteScreen() {
           <View style={styles.pairCard}>
             <Text style={styles.cardTitle}>Reconnecting to desktop…</Text>
             <Text style={styles.cardBody}>
-              Your paired desktop is configured but unreachable. Make sure the
-              laptop is awake and on the network — no need to pair again.
+              Your paired desktop is configured but unreachable. Make sure the laptop is awake and
+              on the network — no need to pair again.
             </Text>
           </View>
         )}
 
         {pendingApprovals.length > 0 && (
-          <TouchableOpacity
-            style={styles.approvalBanner}
-            onPress={() => router.push("/approvals")}
-          >
+          <TouchableOpacity style={styles.approvalBanner} onPress={() => router.push("/approvals")}>
             <Text style={styles.approvalBannerText}>
               ⚠️ {pendingApprovals.length} approval
               {pendingApprovals.length > 1 ? "s" : ""} waiting
@@ -201,18 +194,14 @@ export default function RemoteScreen() {
           <View style={styles.cardHeaderRow}>
             <Text style={styles.cardTitle}>Agent Status</Text>
             {secondsAgo !== null && (
-              <Text style={styles.timestampText}>
-                Updated {secondsAgo}s ago
-              </Text>
+              <Text style={styles.timestampText}>Updated {secondsAgo}s ago</Text>
             )}
           </View>
 
           {agentStatus ? (
             <View>
               {agentStatus.sessionId && (
-                <Text style={styles.sessionMetaText}>
-                  Session: {agentStatus.sessionId}
-                </Text>
+                <Text style={styles.sessionMetaText}>Session: {agentStatus.sessionId}</Text>
               )}
               <Text style={styles.taskSummaryText}>
                 {agentStatus.taskSummary || "No active task description"}
@@ -234,9 +223,7 @@ export default function RemoteScreen() {
                 try {
                   requestSessionList();
                 } catch (err) {
-                  setComposerError(
-                    err instanceof Error ? err.message : "Failed to refresh",
-                  );
+                  setComposerError(err instanceof Error ? err.message : "Failed to refresh");
                 }
               }}
             >
@@ -245,9 +232,7 @@ export default function RemoteScreen() {
           </View>
 
           {remoteSessions.length === 0 ? (
-            <Text style={styles.cardPlaceholderText}>
-              No active sessions reported.
-            </Text>
+            <Text style={styles.cardPlaceholderText}>No active sessions reported.</Text>
           ) : (
             remoteSessions.map((s) => {
               const itemBadge = getStatusBadgeColor(s.status);
@@ -257,18 +242,8 @@ export default function RemoteScreen() {
                     <Text style={styles.sessionItemTitle}>{s.title}</Text>
                     <Text style={styles.sessionItemId}>{s.sessionId}</Text>
                   </View>
-                  <View
-                    style={[
-                      styles.sessionItemBadge,
-                      { backgroundColor: itemBadge.bg },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.sessionItemBadgeText,
-                        { color: itemBadge.text },
-                      ]}
-                    >
+                  <View style={[styles.sessionItemBadge, { backgroundColor: itemBadge.bg }]}>
+                    <Text style={[styles.sessionItemBadgeText, { color: itemBadge.text }]}>
                       {s.status}
                     </Text>
                   </View>
@@ -292,13 +267,8 @@ export default function RemoteScreen() {
             multiline
             numberOfLines={3}
           />
-          {composerError ? (
-            <Text style={styles.errorText}>{composerError}</Text>
-          ) : null}
-          <TouchableOpacity
-            style={styles.primaryButton}
-            onPress={handleSendInstruction}
-          >
+          {composerError ? <Text style={styles.errorText}>{composerError}</Text> : null}
+          <TouchableOpacity style={styles.primaryButton} onPress={handleSendInstruction}>
             <Text style={styles.primaryButtonText}>Send Instruction</Text>
           </TouchableOpacity>
         </View>
@@ -306,20 +276,13 @@ export default function RemoteScreen() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Recent Commands</Text>
           {commandLog.length === 0 ? (
-            <Text style={styles.cardPlaceholderText}>
-              No commands sent yet.
-            </Text>
+            <Text style={styles.cardPlaceholderText}>No commands sent yet.</Text>
           ) : (
             commandLog
               .slice()
               .reverse()
               .map((cmd) => {
-                const icon =
-                  cmd.status === "acked"
-                    ? "✓"
-                    : cmd.status === "failed"
-                      ? "✗"
-                      : "…";
+                const icon = cmd.status === "acked" ? "✓" : cmd.status === "failed" ? "✗" : "…";
                 const iconColor =
                   cmd.status === "acked"
                     ? "#16a34a"
@@ -332,14 +295,10 @@ export default function RemoteScreen() {
                       <Text style={[styles.logIcon, { color: iconColor }]}>
                         {icon} {cmd.status.toUpperCase()}
                       </Text>
-                      <Text style={styles.logTime}>
-                        {new Date(cmd.at).toLocaleTimeString()}
-                      </Text>
+                      <Text style={styles.logTime}>{new Date(cmd.at).toLocaleTimeString()}</Text>
                     </View>
                     <Text style={styles.logInstruction}>{cmd.instruction}</Text>
-                    {cmd.summary && (
-                      <Text style={styles.logSummary}>{cmd.summary}</Text>
-                    )}
+                    {cmd.summary && <Text style={styles.logSummary}>{cmd.summary}</Text>}
                   </View>
                 );
               })
@@ -350,12 +309,7 @@ export default function RemoteScreen() {
           <Text style={styles.killButtonText}>Kill Agent</Text>
         </TouchableOpacity>
         {lastKillAck ? (
-          <Text
-            style={[
-              styles.killAckText,
-              { color: lastKillAck.ok ? "#16a34a" : "#dc2626" },
-            ]}
-          >
+          <Text style={[styles.killAckText, { color: lastKillAck.ok ? "#16a34a" : "#dc2626" }]}>
             {lastKillAck.ok
               ? "✓ Kill acknowledged"
               : `✗ Kill failed${lastKillAck.detail ? `: ${lastKillAck.detail}` : ""}`}

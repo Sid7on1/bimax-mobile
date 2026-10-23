@@ -14,10 +14,7 @@ export interface EnginePort {
   /** Sessions the phone may display/switch between. */
   listSessions(): Promise<AgentSessionInfo[]>;
   /** Fire-and-forget instruction; idempotent via idempotencyKey (§8). */
-  sendInstruction(input: {
-    idempotencyKey: string;
-    instruction: string;
-  }): Promise<CommandResult>;
+  sendInstruction(input: { idempotencyKey: string; instruction: string }): Promise<CommandResult>;
   /** Conversational turn; streams tokens via onToken (§9). */
   chat(
     input: {
@@ -28,7 +25,9 @@ export interface EnginePort {
     },
     onToken: (token: string) => void,
   ): Promise<{ sessionId: string }>;
-  /** Cancel the running task (§11). */
+  /** Cancel current execution even when the operation journal is unavailable.
+   * Safe to call repeatedly; must not skip stopping a running task because of an old cached result.
+   */
   kill(input: { idempotencyKey: string; reason?: string }): Promise<KillResult>;
   /** Register a verified-received file for later reference (§10). */
   attachFile(input: {

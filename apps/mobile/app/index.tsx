@@ -1,5 +1,6 @@
+import { randomId } from "../lib/crypto/keys";
 // app/index.tsx
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   SafeAreaView,
   View,
@@ -11,11 +12,7 @@ import {
   Alert,
 } from "react-native";
 import { useRouter, useFocusEffect } from "expo-router";
-import {
-  listConversations,
-  deleteConversation,
-  type Conversation,
-} from "../lib/chat-store";
+import { listConversations, deleteConversation, type Conversation } from "../lib/chat-store";
 import { getUsage, type UsageInfo } from "../lib/gateway";
 import { supabase } from "../lib/supabase";
 
@@ -31,7 +28,7 @@ export default function ConversationListScreen() {
       setConversations(list);
       const u = await getUsage();
       if (u) setUsage(u);
-    } catch (_err) {
+    } catch {
       // ignore
     } finally {
       setLoading(false);
@@ -41,11 +38,11 @@ export default function ConversationListScreen() {
   useFocusEffect(
     useCallback(() => {
       loadData();
-    }, [loadData])
+    }, [loadData]),
   );
 
   const handleNewChat = () => {
-    const newId = `conv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const newId = randomId("conv");
     router.push(`/chat/${newId}`);
   };
 
@@ -86,10 +83,7 @@ export default function ConversationListScreen() {
         </View>
 
         <View style={styles.headerActions}>
-          <TouchableOpacity
-            style={styles.remoteBtn}
-            onPress={() => router.push("/remote")}
-          >
+          <TouchableOpacity style={styles.remoteBtn} onPress={() => router.push("/remote")}>
             <Text style={styles.remoteBtnText}>💻 Laptop</Text>
           </TouchableOpacity>
           <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut}>

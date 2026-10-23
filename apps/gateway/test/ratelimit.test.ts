@@ -1,6 +1,6 @@
 // test/ratelimit.test.ts
 import { describe, it, expect } from "vitest";
-import { checkRateLimit, getMinuteBucketUTC } from "../src/ratelimit";
+import { checkRateLimit } from "../src/ratelimit";
 import { createTestEnv } from "./mocks";
 
 describe("ratelimit module", () => {

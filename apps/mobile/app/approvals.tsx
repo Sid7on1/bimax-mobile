@@ -42,9 +42,7 @@ function ApprovalCard({
     try {
       await onApprove(item.approvalId);
     } catch (err) {
-      setErrorMsg(
-        err instanceof Error ? err.message : "Approval failed",
-      );
+      setErrorMsg(err instanceof Error ? err.message : "Approval failed");
     } finally {
       setLoading(false);
     }
@@ -56,9 +54,7 @@ function ApprovalCard({
     try {
       await onDeny(item.approvalId, reason);
     } catch (err) {
-      setErrorMsg(
-        err instanceof Error ? err.message : "Failed to record denial",
-      );
+      setErrorMsg(err instanceof Error ? err.message : "Failed to record denial");
     } finally {
       setLoading(false);
     }
@@ -84,37 +80,22 @@ function ApprovalCard({
       </View>
 
       <Text style={styles.metaText}>Session: {item.sessionId}</Text>
-      {item.cwd ? (
-        <Text style={styles.metaText}>CWD: {item.cwd}</Text>
-      ) : null}
+      {item.cwd ? <Text style={styles.metaText}>CWD: {item.cwd}</Text> : null}
 
-      {errorMsg ? (
-        <Text style={styles.cardError}>{errorMsg}</Text>
-      ) : null}
+      {errorMsg ? <Text style={styles.cardError}>{errorMsg}</Text> : null}
 
       {loading ? (
         <ActivityIndicator style={{ marginVertical: 12 }} color="#111827" />
       ) : isExpired ? null : showDenyOptions ? (
         <View style={styles.denyOptionsContainer}>
           <Text style={styles.denyOptionsTitle}>Select denial reason:</Text>
-          <TouchableOpacity
-            style={styles.denyOptionButton}
-            onPress={() => handleDeny("not_me")}
-          >
-            <Text style={styles.denyOptionButtonText}>
-              {"It wasn't me (Alert)"}
-            </Text>
+          <TouchableOpacity style={styles.denyOptionButton} onPress={() => handleDeny("not_me")}>
+            <Text style={styles.denyOptionButtonText}>{"It wasn't me (Alert)"}</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.denyOptionButton}
-            onPress={() => handleDeny("mistake")}
-          >
+          <TouchableOpacity style={styles.denyOptionButton} onPress={() => handleDeny("mistake")}>
             <Text style={styles.denyOptionButtonText}>Mistake</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.denyOptionButton}
-            onPress={() => handleDeny(undefined)}
-          >
+          <TouchableOpacity style={styles.denyOptionButton} onPress={() => handleDeny(undefined)}>
             <Text style={styles.denyOptionButtonText}>Plain Deny</Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -126,16 +107,10 @@ function ApprovalCard({
         </View>
       ) : (
         <View style={styles.actionRow}>
-          <TouchableOpacity
-            style={styles.approveButton}
-            onPress={handleApprove}
-          >
+          <TouchableOpacity style={styles.approveButton} onPress={handleApprove}>
             <Text style={styles.approveButtonText}>Approve</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.denyButton}
-            onPress={() => setShowDenyOptions(true)}
-          >
+          <TouchableOpacity style={styles.denyButton} onPress={() => setShowDenyOptions(true)}>
             <Text style={styles.denyButtonText}>Deny</Text>
           </TouchableOpacity>
         </View>
@@ -151,10 +126,7 @@ export default function ApprovalsScreen() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => router.back()}
-          style={styles.backButton}
-        >
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Text style={styles.backButtonText}>Back</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Approvals</Text>
@@ -168,12 +140,7 @@ export default function ApprovalsScreen() {
           </View>
         ) : (
           pendingApprovals.map((req) => (
-            <ApprovalCard
-              key={req.approvalId}
-              item={req}
-              onApprove={approve}
-              onDeny={deny}
-            />
+            <ApprovalCard key={req.approvalId} item={req} onApprove={approve} onDeny={deny} />
           ))
         )}
       </ScrollView>

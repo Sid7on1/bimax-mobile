@@ -27,13 +27,6 @@ export class RelayStore {
 
   private init(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS outbox (
-        id TEXT PRIMARY KEY,
-        to_device TEXT NOT NULL,
-        envelope TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_outbox_to ON outbox(to_device, created_at);
       CREATE TABLE IF NOT EXISTS pins (
         device_id TEXT PRIMARY KEY,
         pubkey TEXT NOT NULL

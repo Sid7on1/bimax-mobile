@@ -1,5 +1,6 @@
+import { validateRelayUrl } from "../relay/url";
 import type { Envelope, MessageKind, DeviceHello, DeliveryAck, DeviceRole } from "@bimax/protocol";
-import { canonicalJson } from "../crypto/keys";
+import { canonicalJson, randomId } from "../crypto/keys";
 import { bytesToBase64 } from "../crypto/base64";
 
 export interface WebSocketLike {
@@ -19,6 +20,7 @@ export type WsImpl = new (url: string) => WebSocketLike;
 export type ClientStatus = "connecting" | "online" | "reconnecting" | "offline";
 
 export interface RelayClientOptions {
+  authorizeUrl?: (url: string) => Promise<string>;
   url: string; // e.g. "ws://127.0.0.1:8787"
   deviceId: string;
   role: DeviceRole;
@@ -27,7 +29,7 @@ export interface RelayClientOptions {
     pubkeyB64: string;
     sign: (msg: Uint8Array) => Promise<Uint8Array>;
   };
-  onMessage: (env: Envelope<MessageKind, unknown>) => void;
+  onMessage: (env: Envelope<MessageKind, unknown>) => void | Promise<void>;
   onStatus?: (s: ClientStatus) => void;
 }
 
@@ -40,9 +42,11 @@ export class RelayClient {
   private backoffMs = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isExplicitClose = false;
+  private generation = 0;
   private cleanupListeners: (() => void) | null = null;
 
   constructor(opts: RelayClientOptions) {
+    validateRelayUrl(opts.url);
     this.opts = opts;
   }
 
@@ -58,7 +62,7 @@ export class RelayClient {
   }
 
   private randomId(): string {
-    return "m-" + Math.random().toString(36).slice(2);
+    return randomId();
   }
 
   private cleanupCurrentSocket(): void {
@@ -86,199 +90,218 @@ export class RelayClient {
     this.cleanupCurrentSocket();
     this.setStatus("connecting");
 
-    const socket = new this.opts.wsImpl(this.opts.url);
-    this.ws = socket;
-    let disconnected = false;
+    const generation = ++this.generation;
+    void (async () => {
+      if (this.opts.url.startsWith("wss:") && !this.opts.authorizeUrl)
+        throw new Error("Cloud relay requires admission");
+      const url = this.opts.authorizeUrl
+        ? await this.opts.authorizeUrl(this.opts.url)
+        : this.opts.url;
+      if (generation !== this.generation || this.isExplicitClose) return;
+      const socket = new this.opts.wsImpl(url);
+      this.ws = socket;
+      let disconnected = false;
 
-    const onOpen = async () => {
-      if (this.ws !== socket) return;
+      const onOpen = async () => {
+        if (this.ws !== socket) return;
 
-      const id = this.randomId();
-      const ts = Date.now();
-      const from = this.opts.deviceId;
-      const role = this.opts.role;
+        const id = this.randomId();
+        const ts = Date.now();
+        const from = this.opts.deviceId;
+        const role = this.opts.role;
 
-      let helloPayload:
-        | DeviceHello
-        | (Omit<DeviceHello, "helloPubkey" | "helloSignature"> & {
-            helloPubkey?: string;
-            helloSignature?: string;
-          });
+        let helloPayload:
+          | DeviceHello
+          | (Omit<DeviceHello, "helloPubkey" | "helloSignature"> & {
+              helloPubkey?: string;
+              helloSignature?: string;
+            });
 
-      if (this.opts.helloSigner) {
-        try {
-          const signer = this.opts.helloSigner;
-          const canonical = canonicalJson({
-            id,
-            ts,
-            from,
-            deviceId: from,
-            role,
-            helloPubkey: signer.pubkeyB64,
-          });
-          const utf8Bytes = new TextEncoder().encode(canonical);
-          const sig = await signer.sign(utf8Bytes);
+        if (this.opts.helloSigner) {
+          try {
+            const signer = this.opts.helloSigner;
+            const canonical = canonicalJson({
+              id,
+              ts,
+              from,
+              deviceId: from,
+              role,
+              helloPubkey: signer.pubkeyB64,
+              protocolVersion: 2,
+            });
+            const utf8Bytes = new TextEncoder().encode(canonical);
+            const sig = await signer.sign(utf8Bytes);
+            helloPayload = {
+              deviceId: from,
+              role,
+              protocolVersion: 2,
+              helloPubkey: signer.pubkeyB64,
+              helloSignature: bytesToBase64(sig),
+            };
+          } catch {
+            // The hello could not be signed. Tear the socket down and let the
+            // reconnect loop retry — a socket must never stay "online"
+            // without a hello sent.
+            this.cleanupCurrentSocket();
+            handleDisconnect();
+            return;
+          }
+        } else {
           helloPayload = {
             deviceId: from,
             role,
-            protocolVersion: 1,
-            helloPubkey: signer.pubkeyB64,
-            helloSignature: bytesToBase64(sig),
+            protocolVersion: 2,
           };
+        }
+
+        if (this.ws !== socket) return;
+
+        const helloEnv: Envelope<"hello", typeof helloPayload> = {
+          v: 2,
+          id,
+          ts,
+          from,
+          to: "relay",
+          kind: "hello",
+          payload: helloPayload,
+        };
+
+        try {
+          socket.send(JSON.stringify(helloEnv));
         } catch {
-          // The hello could not be signed. Tear the socket down and let the
-          // reconnect loop retry — a socket must never stay "online"
-          // without a hello sent.
-          this.cleanupCurrentSocket();
-          handleDisconnect();
+          // write error will trigger close/error listener
           return;
         }
-      } else {
-        helloPayload = {
-          deviceId: from,
-          role,
-          protocolVersion: 1,
-        };
-      }
 
-      if (this.ws !== socket) return;
+        this.setStatus("online");
+        this.backoffMs = 1000;
 
-      const helloEnv: Envelope<"hello", typeof helloPayload> = {
-        v: 1,
-        id,
-        ts,
-        from,
-        to: "relay",
-        kind: "hello",
-        payload: helloPayload,
+        // Drain outbox FIFO
+        const queued = this.outbox.slice();
+        this.outbox = [];
+        for (let i = 0; i < queued.length; i++) {
+          try {
+            socket.send(JSON.stringify(queued[i]));
+          } catch {
+            // If sending fails, push remaining items back to outbox and stop draining
+            this.outbox = queued.slice(i).concat(this.outbox);
+            break;
+          }
+        }
       };
 
-      try {
-        socket.send(JSON.stringify(helloEnv));
-      } catch {
-        // write error will trigger close/error listener
-        return;
-      }
+      const onMessage = (ev: { data?: unknown }) => {
+        if (this.ws !== socket) return;
 
-      this.setStatus("online");
-      this.backoffMs = 1000;
-
-      // Drain outbox FIFO
-      const queued = this.outbox.slice();
-      this.outbox = [];
-      for (let i = 0; i < queued.length; i++) {
-        try {
-          socket.send(JSON.stringify(queued[i]));
-        } catch {
-          // If sending fails, push remaining items back to outbox and stop draining
-          this.outbox = queued.slice(i).concat(this.outbox);
-          break;
+        let raw: string;
+        if (typeof ev.data === "string") {
+          raw = ev.data;
+        } else if (
+          ev.data != null &&
+          typeof (ev.data as { toString?: unknown }).toString === "function"
+        ) {
+          raw = (ev.data as { toString: () => string }).toString();
+        } else {
+          return;
         }
-      }
-    };
 
-    const onMessage = (ev: { data?: unknown }) => {
-      if (this.ws !== socket) return;
-
-      let raw: string;
-      if (typeof ev.data === "string") {
-        raw = ev.data;
-      } else if (
-        ev.data != null &&
-        typeof (ev.data as { toString?: unknown }).toString === "function"
-      ) {
-        raw = (ev.data as { toString: () => string }).toString();
-      } else {
-        return;
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return; // silently ignore unparsable payloads
-      }
-
-      if (!parsed || typeof parsed !== "object") {
-        return;
-      }
-
-      const env = parsed as Record<string, unknown>;
-      if (
-        typeof env.kind !== "string" ||
-        typeof env.id !== "string"
-      ) {
-        return; // silently ignore envelopes missing string kind/id
-      }
-
-      if (env.kind !== "delivery_ack") {
-        const ackEnv: Envelope<"delivery_ack", DeliveryAck> = {
-          v: 1,
-          id: this.randomId(),
-          ts: Date.now(),
-          from: this.opts.deviceId,
-          to: "relay",
-          kind: "delivery_ack",
-          payload: { id: env.id },
-        };
+        let parsed: unknown;
         try {
-          socket.send(JSON.stringify(ackEnv));
+          parsed = JSON.parse(raw);
         } catch {
-          // ignore
+          return; // silently ignore unparsable payloads
         }
-      }
 
-      this.opts.onMessage(env as unknown as Envelope<MessageKind, unknown>);
-    };
+        if (!parsed || typeof parsed !== "object") {
+          return;
+        }
 
-    const handleDisconnect = () => {
-      if (disconnected) return;
-      disconnected = true;
+        const env = parsed as Record<string, unknown>;
+        if (typeof env.kind !== "string" || typeof env.id !== "string") {
+          return; // silently ignore envelopes missing string kind/id
+        }
 
-      if (this.cleanupListeners) {
-        this.cleanupListeners();
-        this.cleanupListeners = null;
-      }
+        const messageId = env.id;
+        void Promise.resolve(this.opts.onMessage(env as unknown as Envelope<MessageKind, unknown>))
+          .then(() => {
+            if (env.kind !== "delivery_ack") {
+              const ackEnv: Envelope<"delivery_ack", DeliveryAck> = {
+                v: 2,
+                id: this.randomId(),
+                ts: Date.now(),
+                from: this.opts.deviceId,
+                to: "relay",
+                kind: "delivery_ack",
+                payload: {
+                  id: messageId,
+                  fromDevice: typeof env.from === "string" ? env.from : undefined,
+                },
+              };
+              try {
+                socket.send(JSON.stringify(ackEnv));
+              } catch {
+                // ignore
+              }
+            }
+          })
+          .catch(() => {
+            /* Retry retained envelopes if processing did not complete. */
+          });
+      };
 
-      if (this.ws === socket) {
-        this.ws = null;
-      }
+      const handleDisconnect = () => {
+        if (disconnected) return;
+        disconnected = true;
 
-      if (this.isExplicitClose) {
-        this.setStatus("offline");
-        return;
-      }
+        if (this.cleanupListeners) {
+          this.cleanupListeners();
+          this.cleanupListeners = null;
+        }
 
+        if (this.ws === socket) {
+          this.ws = null;
+        }
+
+        if (this.isExplicitClose) {
+          this.setStatus("offline");
+          return;
+        }
+
+        this.setStatus("reconnecting");
+
+        const currentBackoff = this.backoffMs;
+        this.backoffMs = Math.min(this.backoffMs * 2, 30000);
+        const jitter = 0.8 + Math.random() * 0.4; // ±20% jitter
+        const delay = Math.round(currentBackoff * jitter);
+
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+        }
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null;
+          this.connect();
+        }, delay);
+      };
+
+      const onClose = () => handleDisconnect();
+      const onError = () => handleDisconnect();
+
+      socket.addEventListener("open", onOpen);
+      socket.addEventListener("message", onMessage);
+      socket.addEventListener("close", onClose);
+      socket.addEventListener("error", onError);
+
+      this.cleanupListeners = () => {
+        socket.removeEventListener("open", onOpen);
+        socket.removeEventListener("message", onMessage);
+        socket.removeEventListener("close", onClose);
+        socket.removeEventListener("error", onError);
+      };
+    })().catch(() => {
+      if (generation !== this.generation || this.isExplicitClose) return;
       this.setStatus("reconnecting");
-
-      const currentBackoff = this.backoffMs;
-      this.backoffMs = Math.min(this.backoffMs * 2, 30000);
-      const jitter = 0.8 + Math.random() * 0.4; // ±20% jitter
-      const delay = Math.round(currentBackoff * jitter);
-
-      if (this.reconnectTimer) {
-        clearTimeout(this.reconnectTimer);
-      }
-      this.reconnectTimer = setTimeout(() => {
-        this.reconnectTimer = null;
-        this.connect();
-      }, delay);
-    };
-
-    const onClose = () => handleDisconnect();
-    const onError = () => handleDisconnect();
-
-    socket.addEventListener("open", onOpen);
-    socket.addEventListener("message", onMessage);
-    socket.addEventListener("close", onClose);
-    socket.addEventListener("error", onError);
-
-    this.cleanupListeners = () => {
-      socket.removeEventListener("open", onOpen);
-      socket.removeEventListener("message", onMessage);
-      socket.removeEventListener("close", onClose);
-      socket.removeEventListener("error", onError);
-    };
+      this.reconnectTimer = setTimeout(() => this.connect(), 5000);
+    });
   }
 
   send(env: Envelope<MessageKind, unknown>): void {
@@ -291,11 +314,15 @@ export class RelayClient {
         // socket write threw, fall through to outbox queue
       }
     }
+    if (env.kind === "encrypted")
+      throw new Error("Encrypted channel unavailable; retry logical operation after re-handshake");
+    if (this.outbox.length >= 100) throw new Error("Transport outbox full");
     this.outbox.push(env);
   }
 
   close(): void {
     this.isExplicitClose = true;
+    this.generation++;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

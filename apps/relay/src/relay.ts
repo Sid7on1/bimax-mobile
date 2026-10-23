@@ -1,15 +1,14 @@
-import type { Envelope, Presence, DeviceRole } from "@bimax/protocol";
+import type { DeviceRole } from "@bimax/protocol";
 import { WebSocket } from "ws";
 import type { RelayStore } from "./store";
 import {
   RoomStore,
   RateLimiter,
   verifyHello,
+  buildPresence,
   processPostHelloMessage,
   type DeviceAttachment,
 } from "./logic";
-
-const PROTOCOL_VERSION = 1;
 
 export class Relay {
   private store: RelayStore;
@@ -29,6 +28,9 @@ export class Relay {
   }
 
   handleConnection(ws: WebSocket): void {
+    const helloDeadline = setTimeout(() => ws.close(4401, "hello deadline"), 10_000);
+    (helloDeadline as unknown as NodeJS.Timeout).unref();
+    ws.once("close", () => clearTimeout(helloDeadline));
     let isIdentified = false;
     let currentDeviceId: string | null = null;
     let currentRole: DeviceRole | null = null;
@@ -52,6 +54,15 @@ export class Relay {
           return;
         }
 
+        if (!this.roomStore.acceptHello(res.deviceId, (env as { id: string }).id, Date.now())) {
+          ws.close(4401, "hello replay");
+          return;
+        }
+        if (res.isNewPin && this.store.getAllDevices().length >= 16) {
+          ws.close(4429, "device limit");
+          return;
+        }
+        clearTimeout(helloDeadline);
         if (res.isNewPin) this.roomStore.setPin(res.deviceId, res.helloPubkey);
         const deviceId = res.deviceId;
         const role = res.role;
@@ -82,24 +93,18 @@ export class Relay {
         const otherDevices = this.store.getOtherDevices(deviceId);
         for (const other of otherDevices) {
           const isOtherOnline = this.isDeviceOnline(other.device_id);
-          const presEnv: Envelope<"presence", Presence> = {
-            v: PROTOCOL_VERSION,
-            id: `pres-${now}-${Math.random().toString(36).slice(2, 9)}`,
-            ts: now,
-            from: "relay",
-            to: deviceId,
-            kind: "presence",
-            payload: {
-              deviceId: other.device_id,
-              role: other.role as DeviceRole,
-              status: isOtherOnline ? "online" : "offline",
-              lastSeen: other.last_seen,
-            },
-          };
-
           if (ws.readyState === WebSocket.OPEN) {
             try {
-              ws.send(JSON.stringify(presEnv));
+              ws.send(
+                buildPresence(
+                  deviceId,
+                  other.device_id,
+                  other.role,
+                  isOtherOnline ? "online" : "offline",
+                  other.last_seen,
+                  now,
+                ),
+              );
             } catch {
               // ignore
             }
@@ -107,25 +112,10 @@ export class Relay {
         }
 
         // Notify other currently online devices that this device is now online
-        const onlinePresEnv: Envelope<"presence", Presence> = {
-          v: PROTOCOL_VERSION,
-          id: `pres-${now}-${Math.random().toString(36).slice(2, 9)}`,
-          ts: now,
-          from: "relay",
-          to: "",
-          kind: "presence",
-          payload: {
-            deviceId,
-            role,
-            status: "online",
-            lastSeen: now,
-          },
-        };
-
         for (const [otherId, otherWs] of this.onlineSockets.entries()) {
           if (otherId !== deviceId && otherWs.readyState === WebSocket.OPEN) {
             try {
-              otherWs.send(JSON.stringify({ ...onlinePresEnv, to: otherId }));
+              otherWs.send(buildPresence(otherId, deviceId, role, "online", now, now));
             } catch {
               // ignore
             }
@@ -156,7 +146,14 @@ export class Relay {
           ? { send: (data: string) => targetWs.send(data) }
           : null;
       };
-      const outcome = processPostHelloMessage(rawText, attachment, this.roomStore, this.rateLimiter, findTarget, Date.now());
+      const outcome = processPostHelloMessage(
+        rawText,
+        attachment,
+        this.roomStore,
+        this.rateLimiter,
+        findTarget,
+        Date.now(),
+      );
       if (outcome.closeCode) ws.close(outcome.closeCode, outcome.closeReason);
     });
 
@@ -171,25 +168,10 @@ export class Relay {
         const now = Date.now();
         this.store.updateLastSeen(info.deviceId, now);
 
-        const offlinePresEnv: Envelope<"presence", Presence> = {
-          v: PROTOCOL_VERSION,
-          id: `pres-${now}-${Math.random().toString(36).slice(2, 9)}`,
-          ts: now,
-          from: "relay",
-          to: "",
-          kind: "presence",
-          payload: {
-            deviceId: info.deviceId,
-            role: info.role,
-            status: "offline",
-            lastSeen: now,
-          },
-        };
-
         for (const [otherId, otherWs] of this.onlineSockets.entries()) {
           if (otherWs.readyState === WebSocket.OPEN) {
             try {
-              otherWs.send(JSON.stringify({ ...offlinePresEnv, to: otherId }));
+              otherWs.send(buildPresence(otherId, info.deviceId, info.role, "offline", now, now));
             } catch {
               // ignore
             }
@@ -207,7 +189,11 @@ export class Relay {
     for (const [deviceId, ws] of this.onlineSockets) {
       const lastSeen = this.roomStore.getDeviceLastSeen(deviceId);
       if (lastSeen !== null && now - lastSeen > 600_000) {
-        try { ws.close(1001, "idle timeout"); } catch { /* ignore */ }
+        try {
+          ws.close(1001, "idle timeout");
+        } catch {
+          /* ignore */
+        }
       }
     }
     this.roomStore.pruneExpired(now);

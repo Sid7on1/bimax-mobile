@@ -1,0 +1,12 @@
+{
+  "backupPath": "artifacts/private-release/gateway-before-0005-2026-10-16.sql",
+  "backupSha256": "3db4f79a6f91377c100cff4cddf152864262010aee9269026388679f0c38f06e",
+  "backupBytes": 9871,
+  "backupMode": "0600",
+  "restoredIntegrity": "ok",
+  "historicalRows": 19,
+  "historicalRowsUnchanged": true,
+  "remoteApplied": true,
+  "remoteUsageRows": 19,
+  "remoteAuditRows": 0
+}

@@ -160,9 +160,10 @@ async function main() {
       "removeApproval must remove live approval from getPending()",
     );
 
-    // Re-adding the same approvalId throws
+    // A pruned expired request is no longer a pending duplicate.
+    addApproval(liveReq);
     assert.throws(
-      () => addApproval(expiredReq),
+      () => addApproval(liveReq),
       /duplicate approvalId/,
       "re-adding the same approvalId must throw",
     );
@@ -212,7 +213,7 @@ async function main() {
 
     const msg2_1 = desktopResponder1.writeMessage2(new Uint8Array(0));
     const grantEnv1 = {
-      v: 1,
+      v: 2,
       id: "grant-env-1",
       ts: Date.now(),
       from: desktopDeviceId,
@@ -264,7 +265,7 @@ async function main() {
 
     const msg2_2 = desktopResponder2.writeMessage2(new Uint8Array(0));
     const grantEnv2 = {
-      v: 1,
+      v: 2,
       id: "grant-env-2",
       ts: Date.now(),
       from: desktopDeviceId,

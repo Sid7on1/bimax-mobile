@@ -1,3 +1,4 @@
+/** Protocol 2: breaking upgrade; reject v1 peers. Transcript-bound signing identity, explicit transport nonces, and fver 2 are required. */
 /**
  * @bimax/protocol v1.7 — wire protocol between the Bimax desktop engine
  * and the mobile companion app.
@@ -39,7 +40,7 @@
  * can delete it).
  */
 
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
 
 /* ---------------- message kinds ---------------- */
 
@@ -50,10 +51,13 @@ export type MessageKind =
   | "transcript_chunk"
   | "approval_request"
   | "approval_decision"
+  | "approval_result"
   | "mobile_command"
   | "command_ack"
   | "pairing_request"
   | "pairing_grant"
+  | "pairing_prekey_request"
+  | "pairing_prekey"
   | "pairing_revoke"
   | "delivery_ack"
   | "encrypted"
@@ -81,11 +85,11 @@ export type DeviceRole = "desktop" | "mobile";
 
 export interface Envelope<TKind extends string = MessageKind, TPayload = unknown> {
   v: typeof PROTOCOL_VERSION; // protocol version
-  id: string;                 // client-generated stable id — idempotency key for retries
-  ts: number;                 // unix millis, sender clock
-  from: string;               // sender device id (public identifier)
-  to: string;                 // recipient device id ("relay" for hello)
-  kind: TKind;                // message kind
+  id: string; // client-generated stable id — idempotency key for retries
+  ts: number; // unix millis, sender clock
+  from: string; // sender device id (public identifier)
+  to: string; // recipient device id ("relay" for hello)
+  kind: TKind; // message kind
   payload: TPayload;
 }
 
@@ -153,16 +157,17 @@ export interface DeviceHello {
   deviceId: string;
   role: DeviceRole;
   protocolVersion: number; // must equal PROTOCOL_VERSION, else the relay drops the socket
-  helloPubkey: string;    // base64 Ed25519 device public key (the approval-signing key)
+  helloPubkey: string; // base64 Ed25519 device public key (the approval-signing key)
   helloSignature: string; // base64 Ed25519 signature over the canonical JSON bytes of
-                          // { id, ts, from, deviceId, role, helloPubkey }
-                          // where id/ts/from are the hello envelope's own fields
+  // { id, ts, from, deviceId, role, helloPubkey, protocolVersion }
+  // where id/ts/from are the hello envelope's own fields
 }
 
 /* ---------------- delivery acks ---------------- */
 
 export interface DeliveryAck {
   id: string; // envelope id being acknowledged
+  fromDevice?: string; // original sender; required to disambiguate equal IDs across senders
 }
 
 /* ---------------- pairing ---------------- */
@@ -175,19 +180,40 @@ export interface PairingAdvertisement {
   desktopDeviceId: string;
   desktopPublicKey: string; // base64 X25519
   app: "bimax";
+  /** Absent for classical IK. A scanned v2 advertisement MUST NOT fall back. */
+  cryptoVersion?: 2;
+  suite?: "PQIK_MLKEM768_IKPSK0_25519_CHACHAPOLY_BLAKE2S";
+  pqPrekeyId?: string;
+  pqPrekeyHash?: string; // base64 SHA-256 of the 1184-byte encapsulation key
+  expiresAt?: number;
+}
+
+export interface PairingPrekeyRequest {
+  ref: string;
+  pqPrekeyId: string;
+}
+
+export interface PairingPrekey {
+  requestId?: string; // correlates an unauthenticated public-key lookup response
+  advertisement: PairingAdvertisement;
+  publicKey: string; // base64 ML-KEM-768 encapsulation key; verify QR commitment
 }
 
 export interface PairingRequest {
   ref: string;
   mobileDeviceId: string;
-  mobilePublicKey: string; // base64 X25519
+  mobilePublicKey?: string; // Classical compatibility only; PQ identity stays inside Noise M1.
   handshakeMessage: string; // base64 Noise handshake message 1
+  cryptoVersion?: 2;
+  pqPrekeyId?: string;
+  kemCiphertext?: string; // base64 ML-KEM-768 ciphertext, exactly 1088 bytes
 }
 
 export interface PairingGrant {
   mobileDeviceId: string;
   grantedAt: number;
   handshakeMessage: string; // base64 Noise handshake message 2
+  handshakeId?: string; // SHA-256 of Noise M1, also authenticated inside M2; required for PQ.
 }
 
 export interface PairingRevoke {
@@ -210,12 +236,7 @@ export interface Presence {
 /* ---------------- sessions ---------------- */
 
 export type SessionStatus =
-  | "running"
-  | "paused"
-  | "awaiting_approval"
-  | "done"
-  | "failed"
-  | "killed";
+  "running" | "paused" | "awaiting_approval" | "done" | "failed" | "killed";
 
 export interface SessionSummary {
   id: string;
@@ -241,12 +262,12 @@ export interface TranscriptChunk {
 export interface ToolApprovalRequest {
   approvalId: string; // idempotency key for the decision
   sessionId: string;
-  tool: string;       // e.g. "OS_COMMAND"
-  summary: string;     // human-readable: what it wants to do
-  detail: string;      // full command / arguments
+  tool: string; // e.g. "OS_COMMAND"
+  summary: string; // human-readable: what it wants to do
+  detail: string; // full command / arguments
   cwd?: string;
   requestedAt: number;
-  expiresAt: number;   // expiry => treated as denied
+  expiresAt: number; // expiry => treated as denied
 }
 
 export type ApprovalDecisionValue = "approved" | "denied";
@@ -258,20 +279,16 @@ export interface ApprovalDecision {
   decidedAt: number;
   denyReason?: "not_me" | "mistake"; // "not_me" raises a security alert
   requestHash: string; // base64 SHA-256 over the canonical JSON bytes of the
-                       // ToolApprovalRequest the user saw; the desktop MUST
-                       // recompute it from its stored request and reject on
-                       // mismatch BEFORE acting on the decision
+  // ToolApprovalRequest the user saw; the desktop MUST
+  // recompute it from its stored request and reject on
+  // mismatch BEFORE acting on the decision
   signature: string; // base64 Ed25519 over canonical bytes of everything above; desktop verifies
 }
 
 /* ---------------- commands: mobile -> desktop ---------------- */
 
 export type MobileCommandKind =
-  | "send_message"
-  | "pause"
-  | "resume"
-  | "kill"
-  | "request_approval_list";
+  "send_message" | "pause" | "resume" | "kill" | "request_approval_list";
 
 export interface MobileCommand {
   kind: MobileCommandKind;
@@ -299,7 +316,7 @@ export interface ProtocolError {
 export interface ChatMessage {
   idempotencyKey: string; // non-empty, ≤128 chars
   sessionId?: string;
-  text: string;           // ≤32 KB; empty text with no fileIds is rejected
+  text: string; // ≤32 KB; empty text with no fileIds is rejected
   fileIds?: string[];
   sentAt: number;
 }
@@ -321,11 +338,11 @@ export interface ChatDone {
 /* ---------------- secure file transfer (v1.7) ---------------- */
 
 export interface FileOffer {
-  transferId: string;     // 128-bit random hex, client-generated
-  name: string;           // ≤255 chars
-  mime: string;           // allowlist: application/pdf, image/*, text/*, application/octet-stream
-  sizeBytes: number;      // ≤ 25 MB
-  sha256: string;         // hex SHA-256 of the complete file
+  transferId: string; // 128-bit random hex, client-generated
+  name: string; // ≤255 chars
+  mime: string; // allowlist: application/pdf, image/*, text/*, application/octet-stream
+  sizeBytes: number; // ≤ 25 MB
+  sha256: string; // hex SHA-256 of the complete file
 }
 
 export interface FileAccept {
@@ -358,3 +375,18 @@ export interface FileError {
   message: string;
 }
 
+export interface ApprovalResult {
+  approvalId: string;
+  accepted: boolean;
+}
+
+export interface PairingIdentityProof {
+  pairingVersion: 2;
+  sentAt: number;
+  mobileDeviceId: string;
+  ref: string;
+  helloPubkey: string;
+  noisePublicKey: string;
+  desktopPublicKey: string;
+  signature: string;
+}

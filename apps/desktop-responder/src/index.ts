@@ -1,6 +1,8 @@
 import type { EnginePort } from "./engine-port";
-import { loadOrCreateIdentity } from "./identity";
+import { loadOrCreateIdentity, loadIdentity, type IdentityStore } from "./identity";
 import { Responder } from "./responder";
+import type { HostControls } from "./host-controls";
+export * from "./host-controls";
 
 export * from "./engine-port";
 export * from "./identity";
@@ -11,7 +13,7 @@ export * from "./approvals";
 export * from "./idempotency";
 export * from "./files";
 export * from "./chat";
-export * from "./fake-engine";
+export * from "./relay-admission";
 export * from "./responder";
 
 /**
@@ -21,17 +23,31 @@ export * from "./responder";
 export async function startResponder(opts: {
   enginePort: EnginePort;
   relayUrl: string;
-  identityPath: string;
+  identityPath?: string;
+  identityStore?: IdentityStore;
+  allowInsecureFileIdentity?: boolean;
+  authorizeRelayUrl?: (url: string) => Promise<string>;
   lanRelayUrl?: string;
   dataDir?: string;
+  hostControls: HostControls;
+  enablePqPairing?: boolean;
 }): Promise<Responder> {
-  const identity = await loadOrCreateIdentity(opts.identityPath);
+  if (!opts.identityStore && !(opts.allowInsecureFileIdentity && opts.identityPath))
+    throw new Error(
+      "Supply an OS-backed identityStore. Plaintext file identity requires explicit development opt-in.",
+    );
+  const identity = opts.identityStore
+    ? await loadIdentity(opts.identityStore)
+    : await loadOrCreateIdentity(opts.identityPath!);
   const responder = new Responder({
     identity,
     enginePort: opts.enginePort,
     relayUrl: opts.relayUrl,
     lanRelayUrl: opts.lanRelayUrl,
     dataDir: opts.dataDir,
+    authorizeRelayUrl: opts.authorizeRelayUrl,
+    hostControls: opts.hostControls,
+    enablePqPairing: opts.enablePqPairing,
   });
 
   await responder.start();

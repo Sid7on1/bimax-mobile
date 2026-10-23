@@ -1,0 +1,5 @@
+Native SQLite source build verified on Node v24.15.0.
+Built with DEVELOPER_DIR=/Library/Developer/CommandLineTools and npm_config_build_from_source=true npm rebuild better-sqlite3.
+Command exited successfully; compiled object exists at node_modules/better-sqlite3/build/Release/obj.target/better_sqlite3/src/better_sqlite3.o.
+Runtime SQLite version: 3.49.2.
+Xcode settings and license acceptance were not changed.

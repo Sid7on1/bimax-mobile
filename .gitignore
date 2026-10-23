@@ -11,4 +11,13 @@ build/
 .wrangler/
 *.log
 
+# Compiled subpath outputs for @bimax/core (source lives in packages/core/src/)
+packages/core/*.js
+packages/core/*.d.ts
+packages/core/crypto/
+packages/core/e2e/
+packages/core/session/
+packages/core/relay/
 
+# D1 exports may contain private account and billing data.
+artifacts/private-release/

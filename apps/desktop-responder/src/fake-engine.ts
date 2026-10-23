@@ -156,10 +156,7 @@ export class FakeEngine implements EnginePort {
     return { sessionId };
   }
 
-  public async kill(input: {
-    idempotencyKey: string;
-    reason?: string;
-  }): Promise<KillResult> {
+  public async kill(input: { idempotencyKey: string; reason?: string }): Promise<KillResult> {
     this.killExecutionCount++;
     const wasRunning = this.isTaskRunning;
 

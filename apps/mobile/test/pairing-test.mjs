@@ -161,6 +161,8 @@ async function main() {
     staticKeypair: phoneKeypair,
   });
 
+  const { ed25519 } = require("@noble/curves/ed25519.js");
+  const signer = () => {const key=ed25519.keygen();return {pubkeyB64:bytesToBase64(key.publicKey),sign:async msg=>ed25519.sign(msg,key.secretKey)};};
   let desktopReceivedReq = null;
   let desktopResolveReq = null;
   const desktopReqPromise = new Promise((res) => {
@@ -172,6 +174,7 @@ async function main() {
     deviceId: desktopDeviceId,
     role: "desktop",
     wsImpl: WebSocket,
+    helloSigner: signer(),
     onMessage: (env) => {
       if (env.kind === "pairing_request") {
         desktopReceivedReq = env;
@@ -193,6 +196,7 @@ async function main() {
     deviceId: phoneDeviceId,
     role: "mobile",
     wsImpl: WebSocket,
+    helloSigner: signer(),
     onMessage: (env) => {
       if (env.kind === "pairing_grant") {
         phoneReceivedGrant = env;
@@ -207,7 +211,7 @@ async function main() {
   const requestEnv = phoneManager.beginPairing(advert);
   phoneClient.send(requestEnv);
 
-  await desktopReqPromise;
+  await Promise.race([desktopReqPromise,new Promise((_,reject)=>setTimeout(()=>reject(new Error("Pairing request deadline")),5000))]);
   assert.ok(desktopReceivedReq, "desktop must receive pairing_request envelope");
   assert.strictEqual(desktopReceivedReq.payload.ref, advert.ref);
   assert.strictEqual(desktopReceivedReq.payload.mobileDeviceId, phoneDeviceId);
@@ -227,7 +231,7 @@ async function main() {
 
   const handshakeMsg2 = desktopResponder.writeMessage2(new Uint8Array(0));
   const grantEnv = {
-    v: 1,
+    v: 2,
     id: "grant-env-1",
     ts: Date.now(),
     from: desktopDeviceId,
@@ -241,7 +245,7 @@ async function main() {
   };
   desktopClient.send(grantEnv);
 
-  await phoneGrantPromise;
+  await Promise.race([phoneGrantPromise,new Promise((_,reject)=>setTimeout(()=>reject(new Error("Pairing grant deadline")),5000))]);
   assert.ok(phoneReceivedGrant, "phone must receive pairing_grant envelope");
 
   const session = phoneManager.handleGrant(phoneReceivedGrant);
@@ -277,7 +281,7 @@ async function main() {
   tamperedBytes[tamperedBytes.length - 1] ^= 1;
 
   const tamperedGrantEnv = {
-    v: 1,
+    v: 2,
     id: "grant-tampered",
     ts: Date.now(),
     from: "desktop-1",
@@ -305,7 +309,7 @@ async function main() {
   // STEP 3 (grant with no pending pairing)
   console.log("STEP 3 (grant with no pending pairing):");
   const unknownGrantEnv = {
-    v: 1,
+    v: 2,
     id: "grant-unknown",
     ts: Date.now(),
     from: "desktop-unknown-peer",

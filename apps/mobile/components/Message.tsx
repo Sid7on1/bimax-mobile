@@ -1,12 +1,6 @@
 // components/Message.tsx
-import React, { useState } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-} from "react-native";
+import React, { useState, useMemo } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
 import * as Clipboard from "expo-clipboard";
 
 export interface MessageProps {
@@ -20,33 +14,79 @@ export interface MessageProps {
   timestamp?: number;
 }
 
+const CODE_KEYWORDS = new Set([
+  "const",
+  "let",
+  "var",
+  "function",
+  "return",
+  "if",
+  "else",
+  "for",
+  "while",
+  "import",
+  "export",
+  "from",
+  "default",
+  "class",
+  "async",
+  "await",
+  "try",
+  "catch",
+  "finally",
+  "throw",
+  "new",
+  "typeof",
+  "instanceof",
+  "def",
+  "self",
+  "None",
+  "True",
+  "False",
+  "print",
+  "echo",
+  "SELECT",
+  "FROM",
+  "WHERE",
+  "INSERT",
+  "UPDATE",
+  "DELETE",
+  "func",
+  "package",
+  "pub",
+  "fn",
+  "mut",
+  "impl",
+  "struct",
+]);
+
+const CODE_TOKEN_REGEX =
+  /(\/\/.*$|#.*$|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z0-9_]*\b)/gm;
+
 // Simple syntax colorizer for code blocks
-function highlightCode(code: string, lang: string): React.ReactNode[] {
+function highlightCode(code: string): React.ReactNode[] {
   const lines = code.split("\n");
-  const keywords = new Set([
-    "const", "let", "var", "function", "return", "if", "else", "for", "while",
-    "import", "export", "from", "default", "class", "async", "await", "try",
-    "catch", "finally", "throw", "new", "typeof", "instanceof", "def", "self",
-    "None", "True", "False", "print", "echo", "SELECT", "FROM", "WHERE", "INSERT",
-    "UPDATE", "DELETE", "func", "package", "pub", "fn", "mut", "impl", "struct",
-  ]);
 
   return lines.map((line, lineIdx) => {
-    const tokens = line.split(/(\s+|[(),.;:{}[\]<>=+\-*/"'])/g);
+    const tokens = line.split(CODE_TOKEN_REGEX);
     return (
       <View key={lineIdx} style={styles.codeLine}>
         <Text style={styles.lineNumber}>{lineIdx + 1}</Text>
         <Text style={styles.codeText}>
           {tokens.map((token, tokIdx) => {
+            if (!token) return null;
             let color = "#e6edf3";
-            if (keywords.has(token)) {
-              color = "#ff7b72"; // Red/Coral keyword
-            } else if (/^".*"$|^'.*'$/.test(token)) {
-              color = "#a5d6ff"; // Blue string
-            } else if (/^\d+$/.test(token)) {
-              color = "#79c0ff"; // Number
-            } else if (token.startsWith("//") || token.startsWith("#")) {
+            if (token.startsWith("//") || token.startsWith("#")) {
               color = "#8b949e"; // Comment
+            } else if (
+              (token.startsWith('"') && token.endsWith('"')) ||
+              (token.startsWith("'") && token.endsWith("'"))
+            ) {
+              color = "#a5d6ff"; // String
+            } else if (CODE_KEYWORDS.has(token)) {
+              color = "#ff7b72"; // Keyword
+            } else if (/^\d+(?:\.\d+)?$/.test(token)) {
+              color = "#79c0ff"; // Number
             }
             return (
               <Text key={tokIdx} style={{ color }}>
@@ -62,6 +102,7 @@ function highlightCode(code: string, lang: string): React.ReactNode[] {
 
 function CodeBlock({ code, language }: { code: string; language: string }) {
   const [copied, setCopied] = useState(false);
+  const highlighted = useMemo(() => highlightCode(code), [code]);
 
   const handleCopy = async () => {
     await Clipboard.setStringAsync(code);
@@ -73,20 +114,12 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
     <View style={styles.codeBlockContainer}>
       <View style={styles.codeHeader}>
         <Text style={styles.languageLabel}>{language || "text"}</Text>
-        <TouchableOpacity
-          onPress={handleCopy}
-          style={styles.copyButton}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.copyButtonText}>
-            {copied ? "✓ Copied" : "Copy"}
-          </Text>
+        <TouchableOpacity onPress={handleCopy} style={styles.copyButton} activeOpacity={0.7}>
+          <Text style={styles.copyButtonText}>{copied ? "✓ Copied" : "Copy"}</Text>
         </TouchableOpacity>
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={true} style={styles.codeScroll}>
-        <View style={styles.codeBody}>
-          {highlightCode(code, language)}
-        </View>
+        <View style={styles.codeBody}>{highlighted}</View>
       </ScrollView>
     </View>
   );
@@ -119,7 +152,7 @@ function renderMarkdown(content: string): React.ReactNode[] {
         elements.push(
           <Text key={`h1-${partIdx}-${lineIdx}`} style={styles.heading1}>
             {line.slice(2)}
-          </Text>
+          </Text>,
         );
         return;
       }
@@ -129,7 +162,7 @@ function renderMarkdown(content: string): React.ReactNode[] {
         elements.push(
           <Text key={`h2-${partIdx}-${lineIdx}`} style={styles.heading2}>
             {line.slice(3)}
-          </Text>
+          </Text>,
         );
         return;
       }
@@ -139,7 +172,7 @@ function renderMarkdown(content: string): React.ReactNode[] {
         elements.push(
           <Text key={`h3-${partIdx}-${lineIdx}`} style={styles.heading3}>
             {line.slice(4)}
-          </Text>
+          </Text>,
         );
         return;
       }
@@ -150,7 +183,7 @@ function renderMarkdown(content: string): React.ReactNode[] {
           <View key={`bullet-${partIdx}-${lineIdx}`} style={styles.bulletRow}>
             <Text style={styles.bulletSymbol}>•</Text>
             <Text style={styles.bulletText}>{trimmed.slice(2)}</Text>
-          </View>
+          </View>,
         );
         return;
       }
@@ -160,7 +193,7 @@ function renderMarkdown(content: string): React.ReactNode[] {
         elements.push(
           <View key={`quote-${partIdx}-${lineIdx}`} style={styles.blockquote}>
             <Text style={styles.quoteText}>{trimmed.slice(2)}</Text>
-          </View>
+          </View>,
         );
         return;
       }
@@ -169,7 +202,7 @@ function renderMarkdown(content: string): React.ReactNode[] {
       elements.push(
         <Text key={`p-${partIdx}-${lineIdx}`} style={styles.paragraph}>
           {line}
-        </Text>
+        </Text>,
       );
     });
   });
@@ -177,7 +210,7 @@ function renderMarkdown(content: string): React.ReactNode[] {
   return elements;
 }
 
-export function Message({
+export const Message = React.memo(function Message({
   role,
   content,
   reasoning,
@@ -188,6 +221,10 @@ export function Message({
 }: MessageProps) {
   const [isThinkingOpen, setIsThinkingOpen] = useState(false);
   const isUser = role === "user";
+  const renderedMarkdown = useMemo(
+    () => (isUser ? null : renderMarkdown(content)),
+    [isUser, content],
+  );
 
   return (
     <View style={[styles.container, isUser ? styles.userContainer : styles.assistantContainer]}>
@@ -218,10 +255,8 @@ export function Message({
           <Text style={styles.userText}>{content}</Text>
         ) : (
           <View style={styles.assistantTextContainer}>
-            {renderMarkdown(content)}
-            {isStreaming && (
-              <View style={styles.cursor} />
-            )}
+            {renderedMarkdown}
+            {isStreaming && <View style={styles.cursor} />}
           </View>
         )}
       </View>
@@ -241,7 +276,7 @@ export function Message({
       </View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   container: {

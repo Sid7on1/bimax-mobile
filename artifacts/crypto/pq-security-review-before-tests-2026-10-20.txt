@@ -1,0 +1,139 @@
+✖ PQ outer framing does not disclose the initiator static public key (27.6935ms)
+✖ replacing trust invalidates the former phone's pending key confirmation (48.513625ms)
+✖ an in-progress refresh does not swallow authenticated data from the old active channel (21.379125ms)
+✖ a retried verified confirmation is idempotent and never resets the application session (11.881917ms)
+✖ hitting the exact byte budget marks the session for immediate re-handshake (0.13375ms)
+✖ a backend validation failure erases an already-generated prekey secret (6.441958ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 0
+ℹ fail 6
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 121.811375
+
+✖ failing tests:
+
+test at packages/core/test/security-review-test.mjs:27:7
+✖ PQ outer framing does not disclose the initiator static public key (27.6935ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'tx9c/O1mN2wDxPoonxy6i5LKez3jy62SeEi178SxOBU='
+  - undefined
+  
+      at TestContext.<anonymous> (file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:29:16)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.start (node:internal/test_runner/test:1096:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17)
+      at async file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:27:1 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'tx9c/O1mN2wDxPoonxy6i5LKez3jy62SeEi178SxOBU=',
+    expected: undefined,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/core/test/security-review-test.mjs:33:7
+✖ replacing trust invalidates the former phone's pending key confirmation (48.513625ms)
+  AssertionError [ERR_ASSERTION]: Expected "actual" to be strictly unequal to:
+  
+  'confirmed'
+      at TestContext.<anonymous> (file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:43:12)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)
+      at async file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:33:1 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'confirmed',
+    expected: 'confirmed',
+    operator: 'notStrictEqual',
+    diff: 'simple'
+  }
+
+test at packages/core/test/security-review-test.mjs:49:7
+✖ an in-progress refresh does not swallow authenticated data from the old active channel (21.379125ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'rejected'
+  - 'unrelated'
+  
+      at TestContext.<anonymous> (file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:58:12)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)
+      at async file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:49:1 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'rejected',
+    expected: 'unrelated',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/core/test/security-review-test.mjs:63:7
+✖ a retried verified confirmation is idempotent and never resets the application session (11.881917ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'unrelated'
+  - 'duplicate'
+  
+      at TestContext.<anonymous> (file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:68:12)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)
+      at async file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:63:1 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'unrelated',
+    expected: 'duplicate',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/core/test/security-review-test.mjs:74:7
+✖ hitting the exact byte budget marks the session for immediate re-handshake (0.13375ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  false !== true
+  
+      at TestContext.<anonymous> (file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:78:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.start (node:internal/test_runner/test:1096:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17)
+      at run (node:internal/test_runner/harness:396:12)
+      at test (node:internal/test_runner/harness:405:12)
+      at file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:74:7 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at packages/core/test/security-review-test.mjs:81:7
+✖ a backend validation failure erases an already-generated prekey secret (6.441958ms)
+  AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+  
+    assert.ok(secret.every((b) => b === 0))
+  
+      at TestContext.<anonymous> (file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:88:12)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.start (node:internal/test_runner/test:1096:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17)
+      at run (node:internal/test_runner/harness:396:12)
+      at test (node:internal/test_runner/harness:405:12)
+      at file:///Users/vishsiddharth/Desktop/bimax-mobile/packages/core/test/security-review-test.mjs:81:7 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

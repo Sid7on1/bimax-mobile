@@ -33,25 +33,23 @@ export default function LoginScreen() {
       }
     });
 
-    const { data: authListener } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        if (session) {
-          router.replace("/");
-        }
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session) {
+        router.replace("/");
       }
-    );
+    });
 
     return () => {
       authListener.subscription.unsubscribe();
     };
-  }, []);
+  }, [router]);
 
   const handleOAuthSignIn = async (provider: "google" | "github") => {
     setLoading(true);
     try {
-      const redirectUri = makeRedirectUri({
-        scheme: "bimax",
-      });
+      const configuredRedirect = process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL;
+      if (!configuredRedirect && !__DEV__) throw new Error("Use email sign-in for this build");
+      const redirectUri = configuredRedirect || makeRedirectUri({ scheme: "bimax" });
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider,
@@ -63,33 +61,23 @@ export default function LoginScreen() {
 
       if (error) throw error;
       if (data?.url) {
-        const result = await WebBrowser.openAuthSessionAsync(
-          data.url,
-          redirectUri
-        );
+        const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUri);
         if (result.type === "success" && result.url) {
           const url = new URL(result.url);
+          const expected = new URL(redirectUri);
+          if (
+            url.origin !== expected.origin ||
+            url.pathname !== expected.pathname ||
+            url.protocol !== expected.protocol
+          )
+            throw new Error("Unexpected sign-in callback");
           // PKCE flow: code in query string, must be exchanged for a session
           const code = url.searchParams.get("code");
           if (code) {
-            const { error: exchangeError } =
-              await supabase.auth.exchangeCodeForSession(code);
+            const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
             if (exchangeError) throw exchangeError;
           } else {
-            // Implicit flow: tokens arrive in the URL fragment (#access_token=...)
-            const hashParams = new URLSearchParams(url.hash.substring(1));
-            const accessToken =
-              hashParams.get("access_token") ??
-              url.searchParams.get("access_token");
-            const refreshToken =
-              hashParams.get("refresh_token") ??
-              url.searchParams.get("refresh_token");
-            if (accessToken && refreshToken) {
-              await supabase.auth.setSession({
-                access_token: accessToken,
-                refresh_token: refreshToken,
-              });
-            }
+            throw new Error("Sign-in did not return an authorization code. Please try again.");
           }
         }
       }
@@ -113,10 +101,7 @@ export default function LoginScreen() {
       });
       if (error) throw error;
       setIsOtpSent(true);
-      Alert.alert(
-        "Verification Code Sent",
-        `We've sent a 6-digit code to ${email}.`
-      );
+      Alert.alert("Verification Code Sent", `We've sent a 6-digit code to ${email}.`);
     } catch (err: any) {
       Alert.alert("Failed to send code", err.message || String(err));
     } finally {
@@ -158,26 +143,27 @@ export default function LoginScreen() {
         </View>
 
         {/* OAuth Buttons */}
-        <View style={styles.oauthContainer}>
-          <TouchableOpacity
-            style={styles.oauthButton}
-            onPress={() => handleOAuthSignIn("google")}
-            disabled={loading}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.oauthText}>Continue with Google</Text>
-          </TouchableOpacity>
+        {(__DEV__ || process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL) && (
+          <View style={styles.oauthContainer}>
+            <TouchableOpacity
+              style={styles.oauthButton}
+              onPress={() => handleOAuthSignIn("google")}
+              disabled={loading}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.oauthText}>Continue with Google</Text>
+            </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[styles.oauthButton, styles.githubButton]}
-            onPress={() => handleOAuthSignIn("github")}
-            disabled={loading}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.githubText}>Continue with GitHub</Text>
-          </TouchableOpacity>
-        </View>
-
+            <TouchableOpacity
+              style={[styles.oauthButton, styles.githubButton]}
+              onPress={() => handleOAuthSignIn("github")}
+              disabled={loading}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.githubText}>Continue with GitHub</Text>
+            </TouchableOpacity>
+          </View>
+        )}
         <View style={styles.dividerRow}>
           <View style={styles.dividerLine} />
           <Text style={styles.dividerText}>or continue with email</Text>
@@ -198,10 +184,7 @@ export default function LoginScreen() {
               onChangeText={setEmail}
             />
             <TouchableOpacity
-              style={[
-                styles.primaryButton,
-                !email.trim() && styles.primaryButtonDisabled,
-              ]}
+              style={[styles.primaryButton, !email.trim() && styles.primaryButtonDisabled]}
               onPress={handleSendOtp}
               disabled={loading || !email.trim()}
               activeOpacity={0.8}
@@ -246,10 +229,7 @@ export default function LoginScreen() {
               )}
             </TouchableOpacity>
 
-            <TouchableOpacity
-              onPress={() => setIsOtpSent(false)}
-              style={styles.backButton}
-            >
+            <TouchableOpacity onPress={() => setIsOtpSent(false)} style={styles.backButton}>
               <Text style={styles.backButtonText}>Use a different email</Text>
             </TouchableOpacity>
           </View>

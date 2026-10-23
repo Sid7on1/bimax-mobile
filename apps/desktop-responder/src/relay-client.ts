@@ -1,3 +1,4 @@
+import { validateRelayUrl } from "./relay-url";
 import { WebSocket } from "ws";
 import type { Envelope, MessageKind, DeviceHello } from "@bimax/protocol";
 import { canonicalJson, ed25519Sign } from "./crypto/keys";
@@ -19,10 +20,11 @@ export interface WebSocketLike {
 export type WsConstructor = new (url: string) => WebSocketLike;
 
 export interface RelayClientOptions {
+  authorizeUrl?: (url: string) => Promise<string>;
   relayUrl: string; // Base URL, e.g. "ws://127.0.0.1:8787" or "wss://relay.example.com"
   identity: Identity;
   wsImpl?: WsConstructor;
-  onMessage: (env: Envelope<MessageKind, unknown>) => void;
+  onMessage: (env: Envelope<MessageKind, unknown>) => void | Promise<void>;
   onStatus?: (status: ClientStatus) => void;
   autoConnect?: boolean;
 }
@@ -30,10 +32,12 @@ export interface RelayClientOptions {
 const MAX_OUTBOX_SIZE = 500;
 
 export class RelayClient {
+  private authorizeUrl?: (url: string) => Promise<string>;
+  private generation = 0;
   private relayUrl: string;
   private identity: Identity;
   private wsImpl: WsConstructor;
-  private onMessageCallback: (env: Envelope<MessageKind, unknown>) => void;
+  private onMessageCallback: (env: Envelope<MessageKind, unknown>) => void | Promise<void>;
   private onStatusCallback?: (status: ClientStatus) => void;
 
   private _status: ClientStatus = "offline";
@@ -44,7 +48,9 @@ export class RelayClient {
   private isExplicitClose = false;
 
   constructor(opts: RelayClientOptions) {
+    validateRelayUrl(opts.relayUrl);
     this.relayUrl = opts.relayUrl;
+    this.authorizeUrl = opts.authorizeUrl;
     this.identity = opts.identity;
     this.wsImpl = opts.wsImpl ?? (WebSocket as unknown as WsConstructor);
     this.onMessageCallback = opts.onMessage;
@@ -81,11 +87,10 @@ export class RelayClient {
    * Constructs the room WebSocket URL: `/room/<desktopDeviceId>`.
    */
   public getRoomUrl(): string {
-    const cleanBase = this.relayUrl.replace(/\/+$/, "");
-    if (cleanBase.includes("/room/")) {
-      return cleanBase;
-    }
-    return `${cleanBase}/room/${this.identity.deviceId}`;
+    const url = new URL(this.relayUrl);
+    if (!url.pathname.includes("/room/"))
+      url.pathname = `${url.pathname.replace(/\/+$/, "")}/room/${this.identity.deviceId}`;
+    return url.toString();
   }
 
   public connect(): void {
@@ -99,38 +104,48 @@ export class RelayClient {
     this.setStatus("connecting");
 
     const targetUrl = this.getRoomUrl();
-    let socket: WebSocketLike;
-    try {
-      socket = new this.wsImpl(targetUrl);
-    } catch {
-      this.scheduleReconnect();
-      return;
-    }
-    this.ws = socket;
+    const generation = ++this.generation;
+    void (async () => {
+      if (targetUrl.startsWith("wss:") && !this.authorizeUrl)
+        throw new Error("Cloud relay requires admission");
+      const authorized = this.authorizeUrl ? await this.authorizeUrl(targetUrl) : targetUrl;
+      if (generation !== this.generation || this.isExplicitClose) return;
+      let socket: WebSocketLike;
+      try {
+        socket = new this.wsImpl(authorized);
+      } catch {
+        this.scheduleReconnect();
+        return;
+      }
+      this.ws = socket;
 
-    socket.on("open", () => {
-      if (this.ws !== socket) return;
-      this.handleSocketOpen(socket);
-    });
+      socket.on("open", () => {
+        if (this.ws !== socket) return;
+        this.handleSocketOpen(socket);
+      });
 
-    socket.on("message", (raw: unknown) => {
-      if (this.ws !== socket) return;
-      this.handleSocketMessage(raw);
-    });
+      socket.on("message", (raw: unknown) => {
+        if (this.ws !== socket) return;
+        this.handleSocketMessage(raw);
+      });
 
-    socket.on("close", () => {
-      if (this.ws !== socket) return;
-      this.handleSocketDisconnect();
-    });
+      socket.on("close", () => {
+        if (this.ws !== socket) return;
+        this.handleSocketDisconnect();
+      });
 
-    socket.on("error", () => {
-      if (this.ws !== socket) return;
-      this.handleSocketDisconnect();
+      socket.on("error", () => {
+        if (this.ws !== socket) return;
+        this.handleSocketDisconnect();
+      });
+    })().catch(() => {
+      if (generation === this.generation && !this.isExplicitClose) this.scheduleReconnect();
     });
   }
 
   public close(): void {
     this.isExplicitClose = true;
+    this.generation++;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -149,9 +164,9 @@ export class RelayClient {
         // Fall back to queueing
       }
     }
-    if (this.outbox.length >= MAX_OUTBOX_SIZE) {
-      this.outbox.shift();
-    }
+    // Application results are recovered by replaying the durable logical request.
+    if (env.kind === "encrypted") throw new Error("No live encrypted channel");
+    if (this.outbox.length >= MAX_OUTBOX_SIZE) throw new Error("Transport outbox full");
     this.outbox.push(data);
   }
 
@@ -170,6 +185,7 @@ export class RelayClient {
       deviceId: from,
       role,
       helloPubkey,
+      protocolVersion: 2,
     });
 
     const utf8Bytes = new TextEncoder().encode(canonicalToSign);
@@ -177,7 +193,7 @@ export class RelayClient {
     const helloSignature = bytesToBase64(sig);
 
     const helloEnvelope: Envelope<"hello", DeviceHello> = {
-      v: 1,
+      v: 2,
       id,
       ts,
       from,
@@ -186,7 +202,7 @@ export class RelayClient {
       payload: {
         deviceId: from,
         role: "desktop",
-        protocolVersion: 1,
+        protocolVersion: 2,
         helloPubkey,
         helloSignature,
       },
@@ -232,30 +248,35 @@ export class RelayClient {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const env = parsed as Envelope<MessageKind, unknown>;
       if (typeof env.kind === "string" && typeof env.from === "string") {
-        if (
-          env.kind !== "delivery_ack" &&
-          env.kind !== "presence" &&
-          typeof env.id === "string" &&
-          env.id.length > 0 &&
-          this.ws &&
-          this.ws.readyState === 1
-        ) {
-          const ackEnv = {
-            v: 1,
-            id: this.randomId("ack"),
-            ts: Date.now(),
-            from: this.identity.deviceId,
-            to: "relay",
-            kind: "delivery_ack",
-            payload: { id: env.id },
-          };
-          try {
-            this.ws.send(JSON.stringify(ackEnv));
-          } catch {
-            // ignore ack send failure
-          }
-        }
-        this.onMessageCallback(env);
+        void Promise.resolve(this.onMessageCallback(env))
+          .then(() => {
+            if (
+              env.kind !== "delivery_ack" &&
+              env.kind !== "presence" &&
+              typeof env.id === "string" &&
+              env.id.length > 0 &&
+              this.ws &&
+              this.ws.readyState === 1
+            ) {
+              const ackEnv = {
+                v: 2,
+                id: this.randomId("ack"),
+                ts: Date.now(),
+                from: this.identity.deviceId,
+                to: "relay",
+                kind: "delivery_ack",
+                payload: { id: env.id, fromDevice: env.from },
+              };
+              try {
+                this.ws.send(JSON.stringify(ackEnv));
+              } catch {
+                // ignore ack send failure
+              }
+            }
+          })
+          .catch(() => {
+            /* No acknowledgement: durable request can be retried. */
+          });
       }
     }
   }

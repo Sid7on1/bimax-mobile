@@ -1,10 +1,18 @@
 /// <reference types="node" />
 import http from "http";
+import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { Relay } from "./relay";
 import { RelayStore } from "./store";
 
 const PORT = parseInt(process.env.PORT || "8787", 10);
+const HOST = process.env.RELAY_HOST || "127.0.0.1";
+const admissionToken = process.env.RELAY_ADMISSION_TOKEN;
+if (
+  (admissionToken && admissionToken.length < 32) ||
+  (!["127.0.0.1", "::1", "localhost"].includes(HOST) && !admissionToken)
+)
+  throw new Error("A LAN listener requires RELAY_ADMISSION_TOKEN with at least 32 characters");
 
 const store = new RelayStore();
 const relay = new Relay(store);
@@ -27,6 +35,15 @@ wss.on("connection", (ws) => {
 });
 
 server.on("upgrade", (req, socket, head) => {
+  const presented = new URL(req.url || "/", "http://localhost").searchParams.get("lanToken") || "";
+  const admitted =
+    !admissionToken ||
+    (Buffer.byteLength(presented) === Buffer.byteLength(admissionToken) &&
+      timingSafeEqual(Buffer.from(presented), Buffer.from(admissionToken)));
+  if (req.headers.origin || !admitted || wss.clients.size >= 32) {
+    socket.destroy();
+    return;
+  }
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req);
   });
@@ -35,7 +52,7 @@ server.on("upgrade", (req, socket, head) => {
 const reapTimer = setInterval(() => relay.reapIdle(), 60_000);
 (reapTimer as unknown as NodeJS.Timeout).unref();
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`Bimax relay listening on port ${PORT}`);
 });
 

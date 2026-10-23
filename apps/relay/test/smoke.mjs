@@ -130,7 +130,7 @@ async function run() {
   // Client A hellos as desktop-1
   wsA.send(
     JSON.stringify({
-      v: 1,
+      v: 2,
       id: "hello-desktop-1",
       ts: Date.now(),
       from: "desktop-1",
@@ -139,7 +139,7 @@ async function run() {
       payload: {
         deviceId: "desktop-1",
         role: "desktop",
-        protocolVersion: 1,
+        protocolVersion: 2,
       },
     }),
   );
@@ -156,7 +156,7 @@ async function run() {
   // Client B hellos as mobile-1
   wsB.send(
     JSON.stringify({
-      v: 1,
+      v: 2,
       id: "hello-mobile-1",
       ts: Date.now(),
       from: "mobile-1",
@@ -165,7 +165,7 @@ async function run() {
       payload: {
         deviceId: "mobile-1",
         role: "mobile",
-        protocolVersion: 1,
+        protocolVersion: 2,
       },
     }),
   );
@@ -176,7 +176,7 @@ async function run() {
   const sessionListId = "sess-list-1";
   wsA.send(
     JSON.stringify({
-      v: 1,
+      v: 2,
       id: sessionListId,
       ts: Date.now(),
       from: "desktop-1",
@@ -216,7 +216,7 @@ async function run() {
   const offlineMsgId = "sess-list-2-offline";
   wsA.send(
     JSON.stringify({
-      v: 1,
+      v: 2,
       id: offlineMsgId,
       ts: Date.now(),
       from: "desktop-1",
@@ -255,7 +255,7 @@ async function run() {
   // B reconnects with a fresh hello
   wsB2.send(
     JSON.stringify({
-      v: 1,
+      v: 2,
       id: "hello-mobile-2",
       ts: Date.now(),
       from: "mobile-1",
@@ -264,7 +264,7 @@ async function run() {
       payload: {
         deviceId: "mobile-1",
         role: "mobile",
-        protocolVersion: 1,
+        protocolVersion: 2,
       },
     }),
   );
@@ -286,7 +286,7 @@ async function run() {
   // B replies delivery_ack
   wsB2.send(
     JSON.stringify({
-      v: 1,
+      v: 2,
       id: "ack-sess-list-2",
       ts: Date.now(),
       from: "mobile-1",
@@ -317,7 +317,7 @@ async function run() {
 
   wsB3.send(
     JSON.stringify({
-      v: 1,
+      v: 2,
       id: "hello-mobile-3",
       ts: Date.now(),
       from: "mobile-1",
@@ -326,7 +326,7 @@ async function run() {
       payload: {
         deviceId: "mobile-1",
         role: "mobile",
-        protocolVersion: 1,
+        protocolVersion: 2,
       },
     }),
   );

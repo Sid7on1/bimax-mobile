@@ -21,6 +21,7 @@ import type {
   SessionList,
 } from "@bimax/protocol";
 import type { EnginePort } from "./engine-port";
+import { canonicalJson } from "./crypto/keys";
 import { generateDeviceId, type Identity } from "./identity";
 import { RelayClient, type WsConstructor } from "./relay-client";
 import { PairingManager, type TrustedPhoneRecord } from "./pairing";
@@ -29,14 +30,18 @@ import { ApprovalsGate, type SecurityEvent } from "./approvals";
 import { IdempotencyLog } from "./idempotency";
 import { FilePipeline } from "./files";
 import { ChatHandler } from "./chat";
+import type { HostControls, RemoteOperation } from "./host-controls";
 
 export interface ResponderOptions {
   identity: Identity;
   enginePort: EnginePort;
   relayUrl: string;
   lanRelayUrl?: string;
+  authorizeRelayUrl?: (url: string) => Promise<string>;
   dataDir?: string;
   wsImpl?: WsConstructor;
+  hostControls: HostControls;
+  enablePqPairing?: boolean;
 }
 
 export class Responder {
@@ -55,8 +60,12 @@ export class Responder {
 
   private dataDir: string;
   private securityLogPath: string;
+  private hostControls: HostControls;
+  private remoteEpoch = new AbortController();
 
   constructor(opts: ResponderOptions) {
+    if (!opts.hostControls) throw new Error("Desktop host controls are required");
+    this.hostControls = opts.hostControls;
     this.identity = opts.identity;
     this.enginePort = opts.enginePort;
     this.dataDir = opts.dataDir ?? path.join(process.cwd(), ".responder-data");
@@ -68,13 +77,23 @@ export class Responder {
 
     this.e2e = new E2ERegistry();
     this.idempotency = new IdempotencyLog({ storagePath: idempotencyPath });
-    this.filePipeline = new FilePipeline({ inboxDir, enginePort: this.enginePort });
+    this.filePipeline = new FilePipeline({
+      inboxDir,
+      enginePort: this.enginePort,
+      authorizeFile: (name) =>
+        this.authorizeRemote({
+          kind: "file",
+          peer: this.pairingManager.getTrustedPhone()?.phoneDeviceId ?? "",
+          text: name,
+        }),
+    });
 
     this.pairingManager = new PairingManager({
       identity: this.identity,
       relayUrl: opts.relayUrl,
       lanRelayUrl: opts.lanRelayUrl,
       storePath: pairingStorePath,
+      enablePqPairing: opts.enablePqPairing,
     });
 
     this.approvalsGate = new ApprovalsGate({
@@ -90,6 +109,7 @@ export class Responder {
     this.chatHandler = new ChatHandler({
       enginePort: this.enginePort,
       idempotency: this.idempotency,
+      authorize: (msg, peer) => this.authorizeRemote({ kind: "chat", peer, text: msg.text }),
       sendToken: (token: ChatToken) => {
         this.sendEncrypted("chat_token", token);
       },
@@ -102,9 +122,8 @@ export class Responder {
       relayUrl: opts.relayUrl,
       identity: this.identity,
       wsImpl: opts.wsImpl,
-      onMessage: (env) => {
-        void this.handleRelayMessage(env);
-      },
+      authorizeUrl: opts.authorizeRelayUrl,
+      onMessage: (env) => this.handleRelayMessage(env),
     });
 
     // Proactive engine listeners
@@ -119,7 +138,11 @@ export class Responder {
   }
 
   public async start(): Promise<void> {
-    await fs.mkdir(this.dataDir, { recursive: true });
+    await fs.mkdir(this.dataDir, { recursive: true, mode: 0o700 });
+    await fs.chmod(this.dataDir, 0o700);
+    await fs.chmod(this.securityLogPath, 0o600).catch((err: NodeJS.ErrnoException) => {
+      if (err.code !== "ENOENT") throw err;
+    });
     await this.idempotency.init();
     await this.filePipeline.init();
     await this.pairingManager.init();
@@ -127,6 +150,8 @@ export class Responder {
   }
 
   public async stop(): Promise<void> {
+    this.cancelRemoteResources();
+    await this.hostControls.setRemoteSessionActive(false).catch(() => {});
     this.relayClient.close();
     this.pairingManager.destroy();
     this.approvalsGate.destroy();
@@ -158,15 +183,14 @@ export class Responder {
     phoneHelloPubkeyB64?: string,
   ): Promise<TrustedPhoneRecord> {
     const prevPhoneId = this.pairingManager.getTrustedPhone()?.phoneDeviceId;
-    const record = await this.pairingManager.confirmReplaceTrustedPhone(
-      code,
-      phoneHelloPubkeyB64,
-    );
+    const record = await this.pairingManager.confirmReplaceTrustedPhone(code, phoneHelloPubkeyB64);
     if (prevPhoneId && prevPhoneId !== record.phoneDeviceId) {
       this.e2e.clearPeer(prevPhoneId);
     }
     this.approvalsGate.cancelForSession();
-    await this.idempotency.clear();
+    this.cancelRemoteResources();
+    await this.hostControls.setRemoteSessionActive(false).catch(() => {});
+    // Preserve durable operation history across trust changes.
     this.e2e.resetPeer(record.phoneDeviceId);
     return record;
   }
@@ -177,7 +201,7 @@ export class Responder {
   public sendEncrypted(innerKind: MessageKind, body: unknown): boolean {
     const session = this.pairingManager.getActiveSession();
     const trusted = this.pairingManager.getTrustedPhone();
-    if (!session || !trusted) {
+    if (!session || !trusted || session.peerDeviceId !== trusted.phoneDeviceId) {
       return false;
     }
 
@@ -189,7 +213,7 @@ export class Responder {
     try {
       const ciphertext = this.e2e.seal(session, innerKind, body, { id, from, to });
       const env: Envelope<"encrypted", EncryptedPayload> = {
-        v: 1,
+        v: 2,
         id,
         ts,
         from,
@@ -208,43 +232,43 @@ export class Responder {
    * Main incoming envelope dispatcher.
    */
   private async handleRelayMessage(env: Envelope<MessageKind, unknown>): Promise<void> {
-    if (!env || typeof env !== "object") return;
+    if (!env || typeof env !== "object" || env.v !== 2 || env.to !== this.identity.deviceId) return;
 
-    if (env.kind === "hello") {
-      const payload = env.payload as { helloPubkey?: unknown };
-      if (payload && typeof payload.helloPubkey === "string") {
-        this.pairingManager.noteHelloPubkey(env.from, payload.helloPubkey);
-      }
-      return;
-    }
-
-    if (env.kind === "presence" && env.from === "relay") {
-      const payload = env.payload as { deviceId?: unknown; helloPubkey?: unknown };
-      if (
-        payload &&
-        typeof payload.deviceId === "string" &&
-        typeof payload.helloPubkey === "string"
-      ) {
-        this.pairingManager.noteHelloPubkey(payload.deviceId, payload.helloPubkey);
-      }
+    if (env.kind === "pairing_prekey_request") {
+      const request = env.payload as { ref?: string; pqPrekeyId?: string } | null;
+      if (typeof request?.ref !== "string" || typeof request.pqPrekeyId !== "string") return;
+      const prekey = this.pairingManager.getPublicPrekey(request.pqPrekeyId, request.ref);
+      if (prekey)
+        this.relayClient.send({
+          v: 2,
+          id: "prekey-" + generateDeviceId(),
+          ts: Date.now(),
+          from: this.identity.deviceId,
+          to: env.from,
+          kind: "pairing_prekey",
+          payload: { ...prekey, requestId: env.id },
+        });
       return;
     }
 
     if (env.kind === "pairing_request") {
-      const res = this.pairingManager.handlePairingRequest(
+      const res = await this.pairingManager.handlePairingRequest(
         env as Envelope<"pairing_request", PairingRequest>,
       );
       if (res) {
         this.relayClient.send(res.grantEnv);
-        if (res.isRehandshake) {
-          // Re-handshake path per contract §5: reset E2E state
-          this.e2e.resetPeer(res.session.peerDeviceId);
-        }
       }
       return;
     }
 
     if (env.kind === "encrypted") {
+      const confirmation = this.pairingManager.confirmTransport(
+        env as Envelope<"encrypted", EncryptedPayload>,
+      );
+      if (confirmation !== "unrelated") {
+        if (confirmation === "confirmed") this.e2e.resetPeer(env.from);
+        return;
+      }
       await this.handleEncryptedMessage(env as Envelope<"encrypted", EncryptedPayload>);
       return;
     }
@@ -262,7 +286,12 @@ export class Responder {
     const session = this.pairingManager.getActiveSession();
 
     // Authorization boundaries (§6): frame MUST be from trusted phone with active Noise session
-    if (!trusted || !session || env.from !== trusted.phoneDeviceId) {
+    if (
+      !trusted ||
+      !session ||
+      session.peerDeviceId !== trusted.phoneDeviceId ||
+      env.from !== trusted.phoneDeviceId
+    ) {
       await this.logSecurityEvent({
         type: "untrusted_encrypted_frame",
         detail: {
@@ -291,7 +320,7 @@ export class Responder {
     } catch (err) {
       // Contract §6: crypto failures → session teardown + security event
       this.cryptoFailureCount++;
-      this.pairingManager.setActiveSession(null as unknown as import("./session/session").EstablishedSession);
+      this.pairingManager.setActiveSession(null);
       await this.logSecurityEvent({
         type: "crypto_failure",
         detail: {
@@ -323,11 +352,24 @@ export class Responder {
     switch (innerKind) {
       case "command_request": {
         const req = body as CommandRequest;
-        if (!req || typeof req !== "object") return;
+        if (
+          !req ||
+          typeof req.instruction !== "string" ||
+          !req.instruction.trim() ||
+          req.instruction.length > 4000 ||
+          !Number.isFinite(req.sentAt) ||
+          Math.abs(Date.now() - req.sentAt) > 120_000
+        )
+          return;
         try {
           const { result: cmdRes } = await this.idempotency.execute<CommandResult>(
             req.idempotencyKey,
             async () => {
+              await this.authorizeRemote({
+                kind: "command",
+                peer: outer.from,
+                text: req.instruction,
+              });
               return this.enginePort.sendInstruction({
                 idempotencyKey: req.idempotencyKey,
                 instruction: req.instruction,
@@ -338,6 +380,12 @@ export class Responder {
               ok: false,
               summary: err instanceof Error ? err.message : "Engine error",
             }),
+            canonicalJson({
+              peer: outer.from,
+              kind: innerKind,
+              instruction: "instruction" in req ? req.instruction : undefined,
+              reason: "reason" in req ? req.reason : undefined,
+            }),
           );
           this.sendEncrypted("command_result", cmdRes);
         } catch {
@@ -345,7 +393,7 @@ export class Responder {
           this.sendEncrypted("command_result", {
             idempotencyKey: typeof req.idempotencyKey === "string" ? req.idempotencyKey : "",
             ok: false,
-            summary: "Invalid request",
+            summary: "Request rejected or outcome unknown; check desktop before retrying",
           });
         }
         break;
@@ -355,35 +403,35 @@ export class Responder {
         const msg = body as ChatMessage;
         if (!msg || typeof msg !== "object") return;
         try {
-          await this.chatHandler.handleMessage(msg);
+          await this.chatHandler.handleMessage(msg, outer.from);
         } catch {
-          // Handled inside chatHandler
+          this.sendEncrypted("chat_done", {
+            idempotencyKey: typeof msg.idempotencyKey === "string" ? msg.idempotencyKey : "",
+            sessionId: typeof msg.sessionId === "string" ? msg.sessionId : "",
+            ok: false,
+            error: "Chat request rejected",
+            at: Date.now(),
+          });
         }
         break;
       }
 
       case "kill_request": {
         const req = body as KillRequest;
-        if (!req || typeof req !== "object") return;
+        if (
+          !req ||
+          !Number.isFinite(req.sentAt) ||
+          Math.abs(Date.now() - req.sentAt) > 30_000 ||
+          (req.reason !== undefined && (typeof req.reason !== "string" || req.reason.length > 500))
+        )
+          return;
         // Contract §11: Any approval pending for a killed session is auto-resolved as denied
         this.approvalsGate.cancelForSession();
 
         try {
-          const { result: killRes } = await this.idempotency.execute<KillResult>(
-            req.idempotencyKey,
-            async () => {
-              return this.enginePort.kill({
-                idempotencyKey: req.idempotencyKey,
-                reason: req.reason,
-              });
-            },
-            () => ({
-              idempotencyKey: req.idempotencyKey,
-              ok: false,
-              detail: "Failed to abort task",
-              at: Date.now(),
-            }),
-          );
+          IdempotencyLog.validateKey(req.idempotencyKey);
+          // Stopping is an idempotent safety operation; journal availability must never gate it.
+          const killRes = await this.emergencyStop(req.reason, req.idempotencyKey);
           this.sendEncrypted("kill_result", killRes);
         } catch {
           // Pre-execution failure (e.g. invalid idempotency key): no log entry exists.
@@ -399,7 +447,9 @@ export class Responder {
 
       case "approval_decision": {
         const decision = body as ApprovalDecision;
-        this.approvalsGate.handleDecision(decision);
+        const accepted = this.approvalsGate.handleDecision(decision);
+        if (decision && typeof decision.approvalId === "string")
+          this.sendEncrypted("approval_result", { approvalId: decision.approvalId, accepted });
         break;
       }
 
@@ -408,6 +458,8 @@ export class Responder {
           const sessions = await this.enginePort.listSessions();
           const list: SessionList = { sessions };
           this.sendEncrypted("session_list", list);
+          for (const request of this.approvalsGate.getPendingRequests().slice(0, 8))
+            this.sendEncrypted("approval_request", request);
         } catch {
           this.sendEncrypted("session_list", { sessions: [] });
         }
@@ -447,9 +499,11 @@ export class Responder {
 
       case "pairing_revoke": {
         // Phone revoked pairing (§4): delete record, tear down session, clear idempotency entries
+        this.cancelRemoteResources();
+        await this.hostControls.setRemoteSessionActive(false).catch(() => {});
         await this.pairingManager.revokeTrustedPhone();
         this.e2e.clearPeer(outer.from);
-        await this.idempotency.clear();
+        // Preserve durable operation history across trust changes.
         await this.logSecurityEvent({
           type: "pairing_revoked_by_phone",
           detail: { phoneDeviceId: outer.from },
@@ -466,11 +520,62 @@ export class Responder {
     }
   }
 
+  private cancelRemoteResources(): void {
+    this.remoteEpoch.abort();
+    this.remoteEpoch = new AbortController();
+    this.approvalsGate.cancelForSession();
+    this.filePipeline.clearAll();
+  }
+
+  public async emergencyStop(
+    reason = "local_user_stop",
+    idempotencyKey = "local-" + generateDeviceId(),
+  ): Promise<KillResult> {
+    this.cancelRemoteResources();
+    // Call kill before UI/log I/O so a broken banner or full disk cannot prevent stopping.
+    const result = await this.enginePort.kill({ idempotencyKey, reason });
+    await this.hostControls.setRemoteSessionActive(false).catch(() => {});
+    await this.logSecurityEvent({ type: "emergency_stop", detail: { reason }, at: Date.now() });
+    return result;
+  }
+
+  /** Desktop trust revocation must also invalidate pending approvals and encrypted sessions. */
+  public async revokeTrustedPhone(): Promise<string | null> {
+    await this.emergencyStop("local_pairing_revoked");
+    const previous = await this.pairingManager.revokeTrustedPhone();
+    if (previous) this.e2e.clearPeer(previous);
+    return previous;
+  }
+
+  private async authorizeRemote(operation: RemoteOperation): Promise<void> {
+    const signal = this.remoteEpoch.signal;
+    if (
+      operation.peer !== this.pairingManager.getTrustedPhone()?.phoneDeviceId ||
+      !this.pairingManager.getActiveSession()
+    )
+      throw new Error("Remote session is not trusted");
+    await this.hostControls.setRemoteSessionActive(true, operation.peer);
+    const allowed = await this.hostControls.authorize(operation, signal);
+    if (
+      !allowed ||
+      signal.aborted ||
+      operation.peer !== this.pairingManager.getTrustedPhone()?.phoneDeviceId
+    )
+      throw new Error("Remote action was not authorized on the desktop");
+    // Instruction audit must succeed before dispatch. No raw instruction appears in mobile errors.
+    await fs.appendFile(
+      this.securityLogPath,
+      JSON.stringify({ type: "remote_operation", operation, at: Date.now() }) + "\n",
+      { mode: 0o600 },
+    );
+    if (signal.aborted) throw new Error("Remote authorization was revoked");
+  }
+
   public async logSecurityEvent(event: SecurityEvent): Promise<void> {
     try {
       await fs.mkdir(path.dirname(this.securityLogPath), { recursive: true });
       const line = JSON.stringify(event) + "\n";
-      await fs.appendFile(this.securityLogPath, line, "utf-8");
+      await fs.appendFile(this.securityLogPath, line, { encoding: "utf-8", mode: 0o600 });
     } catch {
       // Do not throw on logging failure
     }

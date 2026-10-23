@@ -26,7 +26,7 @@ try {
   const compileCmd = `npx tsc apps/mobile/lib/crypto/keys.ts apps/mobile/lib/crypto/base64.ts apps/mobile/lib/crypto/pairing.ts --outDir ${outDir} --module commonjs --target es2022 --moduleResolution node --strict --esModuleInterop --skipLibCheck`;
   execSync(compileCmd, { cwd: repoRoot, stdio: "pipe" });
 
-  let distDir = outDir;
+  let distDir = fs.existsSync(path.join(outDir,"crypto/keys.js")) ? path.join(outDir,"crypto") : outDir;
   if (!fs.existsSync(path.join(distDir, "keys.js"))) {
     if (fs.existsSync(path.join(distDir, "apps/mobile/lib/crypto/keys.js"))) {
       distDir = path.join(distDir, "apps/mobile/lib/crypto");
@@ -151,7 +151,7 @@ try {
     relayUrl: "wss://relay.bimax.local:8787",
     ref: "ref-sample-1234",
     desktopDeviceId: "desktop-device-001",
-    desktopPublicKey: "YmFzZTY0LXB1YmxpYy1rZXk=",
+    desktopPublicKey: bytesToBase64(generateX25519Keypair().publicKey),
     app: "bimax",
   };
   const parsedAdvert = parseAdvertisement(JSON.stringify(validAdvert));
@@ -184,13 +184,13 @@ try {
   assert.strictEqual(pairingReq.to, parsedAdvert.desktopDeviceId, "to must match desktopDeviceId");
   assert.strictEqual(pairingReq.payload.ref, parsedAdvert.ref, "payload.ref must match advert.ref");
   assert.strictEqual(pairingReq.from, mobileDeviceId, "from must match mobileDeviceId");
-  assert.strictEqual(pairingReq.v, 1, "protocol version must be 1");
+  assert.strictEqual(pairingReq.v, 2, "protocol version must be 2");
   assert.strictEqual(pairingReq.kind, "pairing_request", "kind must be pairing_request");
   assert.strictEqual(pairingReq.payload.mobileDeviceId, mobileDeviceId);
   assert.strictEqual(pairingReq.payload.mobilePublicKey, mobilePublicKeyBase64);
 
   const grantEnvelope = {
-    v: 1,
+    v: 2,
     id: "grant-test-1",
     ts: Date.now(),
     from: parsedAdvert.desktopDeviceId,

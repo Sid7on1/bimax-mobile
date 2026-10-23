@@ -1,0 +1,29 @@
+{
+  "target": "--local",
+  "evidence": {
+    "requestId": "billing-cli-fixture",
+    "providerRequestId": "synthetic-provider-fixture",
+    "operator": "local-test",
+    "reason": "Synthetic fixture only; no real provider evidence",
+    "promptTokens": 10,
+    "completionTokens": 5,
+    "evidenceSha256": "fdee9dd9a6b6cad0f473d97ea95bc1a4f50217e44e55dd378c281d7d669b4cb0"
+  },
+  "current": {
+    "id": 1,
+    "user_id": "fixture-user",
+    "model": "deepseek-chat",
+    "prompt_tokens": 200,
+    "completion_tokens": 0,
+    "created_at": "2026-10-16T00:00:00.000Z",
+    "usage_missing": 1,
+    "request_id": "billing-cli-fixture",
+    "cost_microusd": 300,
+    "input_price": 1000000,
+    "output_price": 2000000,
+    "reservation_status": "settled"
+  },
+  "proposedCostMicrousd": 20,
+  "eligible": true,
+  "applied": false
+}

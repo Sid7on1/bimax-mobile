@@ -1,0 +1,306 @@
+
+> bimax-mobile@0.1.0 check
+> npm run typecheck && npm run lint && npm test
+
+
+> bimax-mobile@0.1.0 typecheck
+> npm run build:core && tsc --noEmit
+
+
+> bimax-mobile@0.1.0 build:core
+> tsc -p packages/core/tsconfig.json
+
+
+> bimax-mobile@0.1.0 lint
+> eslint .
+
+
+> bimax-mobile@0.1.0 test
+> node scripts/test-all.mjs
+
+
+Running /Users/vishsiddharth/Desktop/bimax-mobile/node_modules/typescript/bin/tsc -p packages/core/tsconfig.json
+
+Running /Users/vishsiddharth/Desktop/bimax-mobile/node_modules/typescript/bin/tsc -p apps/relay/tsconfig.json
+
+Running /Users/vishsiddharth/Desktop/bimax-mobile/node_modules/typescript/bin/tsc -p apps/desktop-responder/tsconfig.json
+
+Running packages/core/test/pq-test.mjs
+PASS NIST ACVP ML-KEM-768 key generation
+PASS NIST ACVP encapsulation, decapsulation and invalid public keys
+PASS ML-KEM differential round trips with Node/OpenSSL
+PASS product prologue and KDF match independent Python HKDF fixture
+PASS IKpsk0 ciphertext, transcript and transport match independent Python reference
+PASS versioned QR parsing and relay substitution rejection
+PASS public prekey lookup verifies the scanned commitment
+PASS malformed input cannot burn a prekey; simultaneous identical retries are idempotent; alternate M1 cannot reuse it
+PASS responder cannot send or establish trust before first initiator transport confirmation
+PASS session expiry erases transport keys while preserving unused PQ reconnect material
+PASS PQ refresh provisions a new one-time prekey and swaps sessions only after confirmation; classical downgrade rejected
+PASS classical-to-PQ policy upgrade persists and refuses downgrade across restart/flag changes
+PASS explicit nonce tampering, replay, forward gaps, malformed lengths, and failed-auth recovery
+PASS age, byte and record limits force a fresh handshake without consuming failed operations
+PASS expiry and destruction erase owned one-time prekey buffers
+
+15 PQ/Noise regression groups passed.
+
+Running packages/core/test/security-review-test.mjs
+✔ PQ outer framing does not disclose the initiator static public key (31.534ms)
+✔ replacing trust invalidates the former phone's pending key confirmation (54.695291ms)
+✔ an in-progress refresh does not swallow authenticated data from the old active channel (27.182458ms)
+✔ a retried verified confirmation is idempotent and never resets the application session (14.646708ms)
+✔ hitting the exact byte budget marks the session for immediate re-handshake (0.227083ms)
+✔ a backend validation failure erases an already-generated prekey secret (1.50375ms)
+✔ a delayed M2 from an earlier attempt cannot corrupt the current pending handshake (22.80375ms)
+✔ changing a confirmation's bound header does not consume nonce zero (15.285958ms)
+✔ a LAN URL is validated without changing QR transcript bytes (13.414583ms)
+✔ session and prekey age limits survive a backward wall-clock adjustment (1.739708ms)
+✔ cancelled async pairing work cannot finish or clear a newer attempt (0.487583ms)
+✔ M2 authenticates the M1 correlation value, rather than trusting the outer hint (13.762166ms)
+✔ M1 mutation matrix cannot consume the committed PQ prekey (27.187ms)
+✔ a record crossing the remaining byte budget requests rotation without consuming it (0.143208ms)
+✔ activating saved trust requires the verified session's exact pinned desktop key (0.071708ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 233.377
+
+Running /Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/node_modules/vitest/vitest.mjs run --config /Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway/vitest.config.ts --root apps/gateway
+
+ RUN  v5.0.4 /Users/vishsiddharth/Desktop/bimax-mobile/apps/gateway
+
+
+ Test Files  10 passed (10)
+      Tests  47 passed (47)
+   Start at  01:46:04
+   Duration  492ms (import 58%, tests 27%, transform 12%, worker 3%)
+
+
+Running apps/mobile/test/crypto-test.mjs
+STEP 1 (base64):
+PASS
+STEP 2 (ECDH):
+PASS
+STEP 3 (AEAD):
+PASS
+STEP 4 (signatures + canonical JSON):
+PASS
+STEP 5 (pairing messages):
+PASS
+
+Running apps/mobile/test/noise-test.mjs
+STEP 1 (full handshake):
+PASS
+STEP 2 (tamper):
+PASS
+STEP 3 (wrong peer):
+PASS
+STEP 4 (known-answer):
+PASS
+STEP 5 (transport nonce discipline):
+PASS
+
+Running apps/mobile/test/e2e-test.mjs
+Compiling testable files to tmpdir...
+STEP 1 (roundtrip):
+  PASS
+STEP 2 (tamper):
+  PASS
+STEP 3 (header tampering):
+  PASS
+STEP 4 (duplicates + replay):
+  PASS
+STEP 5 (wrong peer):
+  PASS
+
+ALL STEPS PASSED
+
+Running apps/mobile/test/approvals-test.mjs
+Compiling testable files to tmpdir...
+STEP 1 (sign/verify):
+  PASS
+STEP 2 (approval store):
+  PASS
+STEP 3 (re-handshake):
+  PASS
+STEP 4 (biometric gate):
+  PASS
+STEP 5 (async onDecision propagation & ordering):
+  PASS
+STEP 6 (request binding):
+  PASS
+
+ALL STEPS PASSED
+
+Running apps/mobile/test/control-test.mjs
+Compiling testable files to tmpdir...
+STEP 1 (command roundtrip):
+  PASS
+STEP 2 (status + sessions):
+  PASS
+STEP 3 (kill):
+  PASS
+STEP 4 (duplicate command):
+  PASS
+STEP 5 (large instruction):
+  PASS
+
+ALL STEPS PASSED
+
+Running apps/mobile/test/hello-auth-test.mjs
+STEP 1 (sign/verify roundtrip):
+  PASS
+STEP 2 (ts tamper):
+  PASS
+STEP 3 (wrong key):
+  PASS
+STEP 4 (TOFU pin):
+  PASS
+STEP 5 (kill shapes):
+  PASS
+
+Running apps/mobile/test/pairing-test.mjs
+STEP 1 (full pairing over relay):
+PASS
+STEP 2 (tampered grant):
+PASS
+STEP 3 (grant with no pending pairing):
+PASS
+STEP 4 (session transport):
+PASS
+STEP 5 (verification code):
+PASS
+
+Running apps/mobile/test/relay-smoke.mjs
+Compiling client.ts...
+Building apps/relay...
+Spawning relay server on port 18788...
+Relay server is healthy.
+STEP 1 (hello + presence): PASS
+STEP 2 (live delivery): PASS
+STEP 3 (offline queue + drain + ack, no duplicate): PASS
+STEP 4 (auto-reconnect): PASS
+All four steps PASS
+
+Running apps/relay/test/relay-hardening-test.mjs
+STEP 1 (unsigned hello rejected): PASS
+STEP 2 (squatting blocked): PASS
+STEP 3 (stale hello): PASS
+STEP 4 (sender binding): PASS
+STEP 5 (empty id never stored): PASS
+STEP 6 (ack ownership): PASS
+
+Running apps/cloud-relay/test/relay-v2-test.mjs
+STEP 1 (canonical JSON): PASS
+STEP 2 (hello verify): PASS
+STEP 3 (TOFU): PASS
+STEP 4 (sender binding + validation): PASS
+STEP 5 (outbox): PASS
+STEP 6 (limits + config): PASS
+
+Running apps/desktop-responder/test/integration-test.mjs
+=== DESKTOP RESPONDER INTEGRATION TEST SUITE ===
+Setting up build environments in tmpdir...
+Building apps/relay...
+[RELAY] Bimax relay listening on port 18796
+Relay running on port 18796
+Compiling desktop-responder...
+Compiling mobile stack...
+Desktop Responder started.
+Phone RelayClient online.
+
+--- CASE 1: Pairing ---
+CASE 1: PASS
+
+--- CASE 2: Re-handshake + E2E reset ---
+CASE 2: PASS
+
+--- CASE 3: In-session replay ---
+CASE 3: PASS
+
+--- CASE 4: Chat ---
+CASE 4: PASS
+
+--- CASE 5: Approval v1.6 ---
+CASE 5: PASS
+
+--- CASE 6: Idempotency ---
+CASE 6: PASS
+
+--- CASE 7: Kill ---
+CASE 7: PASS
+
+--- CASE 8: File transfer ---
+Sending file_offer...
+file_offer accepted! Sending chunks...
+Chunks sent! Sending file_done...
+file_received!
+Subcase 8.2: sending oversized offer...
+Subcase 8.2: PASS
+Subcase 8.3: sending path traversal offer...
+Subcase 8.3: PASS
+Subcase 8.4: sending corrupted file...
+Subcase 8.4: waiting for file_accept...
+Subcase 8.4: file_accept received! Sending chunk...
+Subcase 8.4: chunk sent! Sending file_done...
+Subcase 8.4: waiting for file_error...
+Subcase 8.4: file_error received: {
+  code: 'INTEGRITY_ERROR',
+  message: 'SHA-256 mismatch: expected 0000000000000000000000000000000000000000000000000000000000000000, got 9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a',
+  transferId: '00112233445566778899aabbccddeeff'
+}
+Subcase 8.4: PASS
+CASE 8: PASS
+
+--- CASE 9: Recovery ---
+Socket dropped while task in-flight.
+CASE 9: PASS
+
+--- CASE 10: hello-capture ---
+CASE 10: PASS
+
+--- CASE 11: failure idempotency ---
+CASE 11: PASS
+
+--- CASE 12: transfer cap ---
+CASE 12: PASS
+
+--- CASE 13: malformed key ---
+CASE 13: PASS
+
+--- CASE 14: PQ pairing, prekey lookup, idempotent retry and refresh over WebSocket ---
+CASE 14: PASS
+
+=== ALL FOURTEEN INTEGRATION CASES PASSED ===
+
+Running artifacts/audit/reproduce-findings.cjs
+PASS account storage isolation and signed-out access rejection
+PASS completed-operation restart, actual process-crash recovery, payload binding, and fail-closed durability
+PASS empty-prologue conformance, packet loss recovery, replay rejection, and Noise size limits
+PASS raw application message rejection, including spoofed paired-device identifiers
+PASS mobile SSE trailing event, truncated stream, and provider error handling
+PASS real-socket pairing with transcript-bound signing key and no out-of-band key
+All audit regression checks passed.
+
+Running artifacts/audit/security-regressions-round-3.cjs
+PASS registered destinations, scoped retry IDs, semantic retries, ACK ownership, live delivery at capacity
+PASS signed handshake freshness and ephemeral replay rejection without resetting active session
+PASS nonce tampering fails authentication without advancing receive state; disposed session keys are wiped
+PASS stop despite full journal, local stop, host consent, chat validation/retry/error responses, revocation cleanup
+PASS encrypted account storage/outbox, authenticated row binding, encrypted legacy migration, legacy credential removal
+PASS PQ trusted storage validation, ordered updates/clear, and account-change rejection
+PASS bounded local attachment reads, cache deletion on success/failure, structured untrusted attachments, TLS validation
+PASS real LAN upgrade: missing/wrong admission and browser Origin rejected, native token admitted
+All Round 3 security regressions passed.
+
+Running scripts/platform-test.mjs
+PASS actual Workers runtime: D1 reservation, triggers, transaction settlement, and upstream response
+PASS actual Durable Object runtime: PQ prekey lookup and response routing
+PASS actual Durable Object runtime: pre-hello sockets cannot receive traffic or forge offline presence
+PASS actual Durable Object runtime: ticket enforcement, signed hello, SQL state, and replay rejection
+
+All regression suites passed.

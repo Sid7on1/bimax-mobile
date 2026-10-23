@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "mobile",
+    "name": "Bimax",
     "slug": "mobile",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -14,14 +14,16 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bimax.mobile"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.bimax.mobile"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -31,7 +33,13 @@
       "expo-secure-store",
       "expo-camera",
       "expo-web-browser",
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow Bimax to confirm tool approvals with Face ID."
+        }
+      ]
     ]
   }
 }

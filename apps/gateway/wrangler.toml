@@ -1,11 +1,14 @@
 name = "bimax-gateway"
 main = "src/index.ts"
-compatibility_date = "2024-10-01"
+compatibility_date = "2026-10-01"
 
 [vars]
-ALLOWED_MODELS = "deepseek-chat,qwen-plus,qwen-turbo,openai/gpt-oss-20b"
+ALLOWED_MODELS = "deepseek-chat,qwen-plus,qwen-turbo"
 DEFAULT_MONTHLY_TOKENS = "4000000"
 RATE_LIMIT_PER_MIN = "30"
+MAX_OUTPUT_TOKENS = "2048"
+# Set MODEL_PRICES_JSON and GLOBAL_MONTHLY_MICROUSD for each environment.
+# Admission fails closed until current prices and a global spend ceiling are set.
 # NOTE: MOCK_UPSTREAM must NEVER be set here — it would ship mock responses
 # to production. Local dev uses .dev.vars (wrangler dev only, never deployed).
 
@@ -21,3 +24,11 @@ id = "93b10ad93c334b1f8952ebcdb0456e9d"
 [[kv_namespaces]]
 binding = "GATEWAY_RATELIMIT"
 id = "ce5e0f8bb2cf469f98333e561c860dea"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 0.1
+redact_query_string = true

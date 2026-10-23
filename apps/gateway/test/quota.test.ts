@@ -69,11 +69,10 @@ describe("quota module", () => {
     });
 
     const res = await worker.fetch(req, env, {} as ExecutionContext);
-    expect(res.status).toBe(429);
+    expect(res.status).toBe(503);
 
     const json = (await res.json()) as { error: { code: string; message: string } };
-    expect(json.error.code).toBe("quota_unavailable");
-    expect(json.error.message).toContain("Usage check temporarily unavailable");
+    expect(json.error.code).toBe("admission_unavailable");
     expect(fetchSpy).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();

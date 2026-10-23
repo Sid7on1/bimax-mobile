@@ -26,10 +26,11 @@ export interface FilePipelineOptions {
   inboxDir: string;
   enginePort: EnginePort;
   offerTtlMs?: number;
+  authorizeFile?: (name: string) => Promise<void>;
 }
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
-const MAX_CHUNK_SIZE_BYTES = 64 * 1024; // 64 KB
+const MAX_CHUNK_SIZE_BYTES = 32 * 1024; // 32 KiB leaves room for base64 + authenticated JSON framing
 const DEFAULT_OFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_CONCURRENT_TRANSFERS = 4;
 
@@ -39,16 +40,24 @@ export class FilePipeline {
   private inboxDir: string;
   private enginePort: EnginePort;
   private offerTtlMs: number;
+  private generation = 0;
+  private authorizeFile: (name: string) => Promise<void>;
   private activeTransfers = new Map<string, ActiveTransfer>();
 
   constructor(opts: FilePipelineOptions) {
     this.inboxDir = opts.inboxDir;
     this.enginePort = opts.enginePort;
     this.offerTtlMs = opts.offerTtlMs ?? DEFAULT_OFFER_TTL_MS;
+    this.authorizeFile =
+      opts.authorizeFile ??
+      (async () => {
+        throw new Error("Host authorization required");
+      });
   }
 
   public async init(): Promise<void> {
-    await fs.mkdir(this.inboxDir, { recursive: true });
+    await fs.mkdir(this.inboxDir, { recursive: true, mode: 0o700 });
+    await fs.chmod(this.inboxDir, 0o700);
   }
 
   /**
@@ -58,13 +67,18 @@ export class FilePipeline {
   public static isAllowedMime(mime: string): boolean {
     if (typeof mime !== "string") return false;
     const lower = mime.toLowerCase().trim();
-    if (lower === "application/pdf" || lower === "application/octet-stream") {
-      return true;
-    }
-    if (lower.startsWith("image/") || lower.startsWith("text/")) {
-      return true;
-    }
-    return false;
+    return [
+      "application/pdf",
+      "application/octet-stream",
+      "application/json",
+      "text/plain",
+      "text/markdown",
+      "text/csv",
+      "image/png",
+      "image/jpeg",
+      "image/gif",
+      "image/webp",
+    ].includes(lower);
   }
 
   /**
@@ -151,7 +165,17 @@ export class FilePipeline {
 
     // Accept transfer
     this.activeTransfers.set(transferId, {
-      offer,
+      offer: {
+        ...offer,
+        name:
+          name
+            .replace(/\\/g, "/")
+            .split("/")
+            .pop()!
+            .replace(/[\x00-\x1f\x7f<>:"|?*]/g, "_")
+            .replace(/^\.{1,2}$/, "attachment") || "attachment",
+        mime: mime.trim().toLowerCase(),
+      },
       createdAt: now,
       expectedSeq: 0,
       chunks: [],
@@ -165,10 +189,7 @@ export class FilePipeline {
    * Handles incoming file_chunk.
    * Enforces strict sequence and max 64 KB chunk size.
    */
-  public handleChunk(
-    chunk: FileChunk,
-    now: number = Date.now(),
-  ): { error?: FileError } {
+  public handleChunk(chunk: FileChunk, now: number = Date.now()): { error?: FileError } {
     this.sweepExpired(now);
 
     if (!chunk || typeof chunk !== "object") {
@@ -220,14 +241,14 @@ export class FilePipeline {
       };
     }
 
-    // Max 64 KB per chunk
+    // Max 32 KB per chunk
     if (decoded.length > MAX_CHUNK_SIZE_BYTES) {
       this.activeTransfers.delete(transferId);
       return {
         error: {
           transferId,
           code: "CHUNK_TOO_LARGE",
-          message: `Chunk size ${decoded.length} exceeds 64 KB limit`,
+          message: `Chunk size ${decoded.length} exceeds ${MAX_CHUNK_SIZE_BYTES / 1024} KB limit`,
         },
       };
     }
@@ -273,6 +294,7 @@ export class FilePipeline {
       };
     }
 
+    const generation = this.generation;
     const { transferId } = done;
     const transfer = this.activeTransfers.get(transferId);
     if (!transfer) {
@@ -328,14 +350,42 @@ export class FilePipeline {
       };
     }
 
+    const magic = Array.from(combined.slice(0, 12));
+    const ascii = new TextDecoder().decode(combined.slice(0, 12));
+    const mime = transfer.offer.mime;
+    const valid =
+      mime === "image/png"
+        ? magic.slice(0, 8).join(",") === "137,80,78,71,13,10,26,10"
+        : mime === "image/jpeg"
+          ? magic[0] === 255 && magic[1] === 216 && magic[2] === 255
+          : mime === "image/gif"
+            ? /^GIF8[79]a/.test(ascii)
+            : mime === "image/webp"
+              ? ascii.startsWith("RIFF") && ascii.slice(8, 12) === "WEBP"
+              : mime === "application/pdf"
+                ? ascii.startsWith("%PDF-")
+                : true;
+    if (!valid)
+      return {
+        error: {
+          transferId,
+          code: "CONTENT_TYPE_MISMATCH",
+          message: "File content does not match its type",
+        },
+      };
+
     // Responder-generated fileId (original name kept OUT of the path)
     const fileId = "f-" + generateDeviceId();
     const filePath = path.join(this.inboxDir, fileId);
     const metaPath = path.join(this.inboxDir, `${fileId}.meta.json`);
 
     try {
-      await fs.mkdir(this.inboxDir, { recursive: true });
-      await fs.writeFile(filePath, combined);
+      if (generation !== this.generation) throw new Error("Transfer revoked");
+      await this.authorizeFile(transfer.offer.name);
+      if (generation !== this.generation) throw new Error("Transfer revoked");
+
+      await fs.mkdir(this.inboxDir, { recursive: true, mode: 0o700 });
+      await fs.writeFile(filePath, combined, { mode: 0o600 });
 
       const metadata = {
         fileId,
@@ -345,8 +395,12 @@ export class FilePipeline {
         sha256: expectedHex,
         receivedAt: now,
       };
-      await fs.writeFile(metaPath, JSON.stringify(metadata, null, 2), "utf-8");
+      await fs.writeFile(metaPath, JSON.stringify(metadata, null, 2), {
+        encoding: "utf-8",
+        mode: 0o600,
+      });
 
+      if (generation !== this.generation) throw new Error("Transfer revoked");
       // Inform engine
       await this.enginePort.attachFile({
         fileId,
@@ -355,6 +409,7 @@ export class FilePipeline {
         sizeBytes: total,
       });
     } catch {
+      combined.fill(0);
       await fs.unlink(filePath).catch(() => {});
       await fs.unlink(metaPath).catch(() => {});
       return {
@@ -374,9 +429,17 @@ export class FilePipeline {
     };
   }
 
+  public clearAll(): void {
+    this.generation++;
+    for (const transfer of this.activeTransfers.values())
+      for (const chunk of transfer.chunks) chunk.fill(0);
+    this.activeTransfers.clear();
+  }
+
   private sweepExpired(now: number): void {
     for (const [id, t] of this.activeTransfers.entries()) {
       if (now - t.createdAt > this.offerTtlMs) {
+        for (const chunk of t.chunks) chunk.fill(0);
         this.activeTransfers.delete(id);
       }
     }

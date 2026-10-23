@@ -10,7 +10,8 @@
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "better-sqlite3": "^11.8.1",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "@bimax/core": "0.1.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

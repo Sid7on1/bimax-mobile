@@ -1,8 +1,4 @@
-import type {
-  ToolApprovalRequest,
-  ApprovalDecision,
-  ApprovalDecisionValue,
-} from "@bimax/protocol";
+import type { ToolApprovalRequest, ApprovalDecision, ApprovalDecisionValue } from "@bimax/protocol";
 import { canonicalJson, ed25519Sign, ed25519Verify, sha256Bytes } from "../crypto/keys";
 import { bytesToBase64, base64ToBytes } from "../crypto/base64";
 
@@ -23,10 +19,7 @@ export function addApproval(req: ToolApprovalRequest): void {
   if (!req || typeof req !== "object") {
     throw new Error("addApproval: expected object");
   }
-  if (
-    typeof req.approvalId !== "string" ||
-    req.approvalId.trim().length === 0
-  ) {
+  if (typeof req.approvalId !== "string" || req.approvalId.trim().length === 0) {
     throw new Error("addApproval: missing or invalid approvalId");
   }
   if (typeof req.sessionId !== "string" || req.sessionId.trim().length === 0) {
@@ -136,10 +129,7 @@ export function approvalRequestHash(req: ToolApprovalRequest): string {
  * the signature — callers must ALSO call verifyApprovalDecision. A decision
  * is only trustworthy when BOTH pass.
  */
-export function verifyDecisionBinding(
-  dec: ApprovalDecision,
-  req: ToolApprovalRequest,
-): boolean {
+export function verifyDecisionBinding(dec: ApprovalDecision, req: ToolApprovalRequest): boolean {
   try {
     if (!dec || typeof dec !== "object") return false;
     if (typeof dec.requestHash !== "string" || dec.requestHash.length === 0) {
@@ -175,10 +165,7 @@ export function signApprovalDecision(
  * was made for a particular request — call verifyDecisionBinding(dec, req)
  * with the request the user saw, and require BOTH to pass.
  */
-export function verifyApprovalDecision(
-  dec: ApprovalDecision,
-  publicKey: Uint8Array,
-): boolean {
+export function verifyApprovalDecision(dec: ApprovalDecision, publicKey: Uint8Array): boolean {
   try {
     if (!dec || typeof dec !== "object") return false;
     if (typeof dec.signature !== "string" || dec.signature.length === 0) {
@@ -214,9 +201,7 @@ export interface DecideWithBiometricOptions {
  * Injected biometric gate for approving or denying decisions.
  * Only executes signing when requestBiometric resolves to true.
  */
-export async function decideWithBiometric(
-  opts: DecideWithBiometricOptions,
-): Promise<void> {
+export async function decideWithBiometric(opts: DecideWithBiometricOptions): Promise<void> {
   const allowed = await opts.requestBiometric();
   if (!allowed) {
     opts.onDenied("biometric-failed");

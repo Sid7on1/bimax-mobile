@@ -7,7 +7,8 @@
     "apps/*"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "build:core": "tsc -p packages/core/tsconfig.json",
+    "typecheck": "npm run build:core && tsc --noEmit",
     "lint": "eslint .",
     "noise-kat": "node apps/mobile/test/noise-test.mjs",
     "pairing-test": "node apps/mobile/test/pairing-test.mjs",
@@ -22,18 +23,37 @@
     "e2e": "node apps/mobile/test/e2e-test.mjs",
     "control": "node apps/mobile/test/control-test.mjs",
     "hello-auth": "node apps/mobile/test/hello-auth-test.mjs",
-    "nonce": "node apps/mobile/test/crypto-test.mjs"
+    "nonce": "node apps/mobile/test/crypto-test.mjs",
+    "test": "node scripts/test-all.mjs",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "test:platform": "node scripts/platform-test.mjs",
+    "pq-test": "npm run build:core && npm run build --workspace desktop-responder && node packages/core/test/pq-test.mjs && node packages/core/test/security-review-test.mjs",
+    "benchmark:pairing": "npm run build:core && node scripts/benchmark-pairing.mjs"
   },
   "devDependencies": {
+    "@noble/curves": "^2.4.0",
     "eslint": "^9.22.0",
     "eslint-config-expo": "~9.2.0",
+    "jose": "^5.10.0",
+    "miniflare": "5.20261012.0-beta",
     "prettier": "^3.5.3",
-    "typescript": "~5.8.3"
+    "react-native-reanimated": "4.5.1",
+    "react-native-worklets": "0.10.1",
+    "typescript": "~5.8.3",
+    "uuid": "11.1.1",
+    "wrangler": "^4.151.0",
+    "xcode": "3.0.1"
   },
   "overrides": {
+    "uuid": "11.1.1",
+    "react-native-reanimated": "4.5.1",
+    "react-native-worklets": "0.10.1",
     "expo-router": {
       "expo-constants": "$expo-constants",
       "expo-linking": "$expo-linking"
     }
+  },
+  "engines": {
+    "node": ">=24.15.0 <25"
   }
 }

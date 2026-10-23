@@ -94,6 +94,7 @@ try {
       deviceId: "dev-mobile-1",
       role: "mobile",
       helloPubkey,
+      protocolVersion:2,
     };
     const canonicalStr = canonicalJson(helloMsg);
     const msgBytes = new TextEncoder().encode(canonicalStr);
@@ -101,14 +102,14 @@ try {
     const helloSignature = bytesToBase64(sigBytes);
 
     validEnv = {
-      v: 1,
+      v: 2,
       id: "hello-env-1",
       ts: validNow,
       from: "dev-mobile-1",
       to: "relay",
       kind: "hello",
       payload: {
-        protocolVersion: 1,
+        protocolVersion: 2,
         deviceId: "dev-mobile-1",
         role: "mobile",
         helloPubkey,
@@ -184,19 +185,20 @@ try {
       deviceId: "dev-mobile-1",
       role: "mobile",
       helloPubkey: imposterPub,
+      protocolVersion:2,
     };
     const imposterSig = bytesToBase64(
       ed25519.sign(new TextEncoder().encode(canonicalJson(imposterMsg)), imposterKp.secretKey),
     );
     const imposterEnv = {
-      v: 1,
+      v: 2,
       id: "hello-env-2",
       ts: validNow,
       from: "dev-mobile-1",
       to: "relay",
       kind: "hello",
       payload: {
-        protocolVersion: 1,
+        protocolVersion: 2,
         deviceId: "dev-mobile-1",
         role: "mobile",
         helloPubkey: imposterPub,
@@ -232,7 +234,7 @@ try {
 
     // Message with from different from authed device → rejected
     const badFromMsg = JSON.stringify({
-      v: 1,
+      v: 2,
       id: "msg-1",
       ts: now,
       from: "desktop-imposter",
@@ -246,7 +248,7 @@ try {
 
     // Envelope with empty id → rejected before storage
     const emptyIdMsg = JSON.stringify({
-      v: 1,
+      v: 2,
       id: "",
       ts: now,
       from: "mobile-1",
@@ -260,7 +262,7 @@ try {
 
     // Envelope with empty to → dropped, nothing stored
     const emptyToMsg = JSON.stringify({
-      v: 1,
+      v: 2,
       id: "msg-valid-2",
       ts: now,
       from: "mobile-1",
@@ -290,28 +292,29 @@ try {
     });
 
     const baseTime = 100000;
+    const envelope=(id)=>JSON.stringify({v:2,id,from:"source",to:"destination",kind:"encrypted",payload:{ciphertext:id}});
 
     // Save three rows for an offline device → retrieved in created_at order
-    store5.saveOutbox("r1", "dev-offline", "env-1", baseTime + 1000);
-    store5.saveOutbox("r2", "dev-offline", "env-2", baseTime + 2000);
-    store5.saveOutbox("r3", "dev-offline", "env-3", baseTime + 3000);
-    assert.deepStrictEqual(store5.drainOutbox("dev-offline"), ["env-1", "env-2", "env-3"]);
+    store5.saveOutbox("r1", "dev-offline", envelope("env-1"), baseTime + 1000);
+    store5.saveOutbox("r2", "dev-offline", envelope("env-2"), baseTime + 2000);
+    store5.saveOutbox("r3", "dev-offline", envelope("env-3"), baseTime + 3000);
+    assert.deepStrictEqual(store5.drainOutbox("dev-offline"), [envelope("env-1"), envelope("env-2"), envelope("env-3")]);
 
     // Insert a row older than the TTL → pruned on the next save
     // Insert r-old at baseTime - 20000 (80000). Cutoff on next save at baseTime + 4000 (104000) will be 94000.
-    store5.saveOutbox("r-old", "dev-ttl", "env-old", baseTime - 20000);
+    store5.saveOutbox("r-old", "dev-ttl", envelope("env-old"), baseTime - 20000);
 
     // With small test constants (cap 3), saving a 4th row trims the oldest (and prunes r-old)
-    store5.saveOutbox("r4", "dev-offline", "env-4", baseTime + 4000);
+    assert.throws(()=>store5.saveOutbox("r4", "dev-offline", envelope("env-4"), baseTime + 4000),/capacity/);
     // r-old was pruned:
     assert.deepStrictEqual(store5.drainOutbox("dev-ttl"), [], "row older than TTL must be pruned");
     // r1 was trimmed by cap 3:
-    assert.deepStrictEqual(store5.drainOutbox("dev-offline"), ["env-2", "env-3", "env-4"]);
+    assert.deepStrictEqual(store5.drainOutbox("dev-offline"), [envelope("env-1"), envelope("env-2"), envelope("env-3")]);
 
     // delivery_ack from a DIFFERENT device → row kept
-    store5.saveOutbox("r-ack", "dev-owner", "env-ack", baseTime + 5000);
+    store5.saveOutbox("r-ack", "dev-owner", envelope("env-ack"), baseTime + 5000);
     store5.deleteOutboxIfOwner("r-ack", "dev-imposter");
-    assert.deepStrictEqual(store5.drainOutbox("dev-owner"), ["env-ack"]);
+    assert.deepStrictEqual(store5.drainOutbox("dev-owner"), [envelope("env-ack")]);
 
     // ack from the owning device → row deleted
     store5.deleteOutboxIfOwner("r-ack", "dev-owner");

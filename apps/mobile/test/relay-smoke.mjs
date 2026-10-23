@@ -5,10 +5,10 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ed25519 } from "@noble/curves/ed25519.js";
 
 const require = createRequire(import.meta.url);
 const WebSocket = require("ws");
-import { ed25519 } from "@noble/curves/ed25519.js";
 
 function bytesToBase64(bytes) {
   let binary = "";
@@ -188,13 +188,13 @@ async function run() {
 
   // STEP 2 (live delivery)
   const sessionListEnv = {
-    v: 1,
+    v: 2,
     id: "sess-msg-1",
     ts: Date.now(),
     from: "desktop-1",
     to: "mobile-1",
-    kind: "session_list",
-    payload: { sessions: [] },
+    kind: "encrypted",
+    payload: { ciphertext: "opaque-transport-test-data" },
   };
   clientA.send(sessionListEnv);
 
@@ -210,7 +210,7 @@ async function run() {
     console.log("STEP 2 (live delivery): PASS");
   } else {
     console.log("STEP 2 (live delivery): FAIL");
-    throw new Error("Step 2 failed: client B did not receive session_list envelope");
+    throw new Error("Step 2 failed: client B did not receive opaque encrypted envelope");
   }
 
   // STEP 3 (offline queue + drain + ack, no duplicate)
@@ -219,13 +219,13 @@ async function run() {
 
   const msgsBCountBefore = msgsB.length;
   const offlineEnv = {
-    v: 1,
+    v: 2,
     id: "sess-msg-2-offline",
     ts: Date.now(),
     from: "desktop-1",
     to: "mobile-1",
-    kind: "session_list",
-    payload: { sessions: [] },
+    kind: "encrypted",
+    payload: { ciphertext: "opaque-transport-test-data" },
   };
   clientA.send(offlineEnv);
 

@@ -54,6 +54,7 @@ try {
     deviceId: "device-test-1",
     role: "mobile",
     helloPubkey,
+    protocolVersion:2,
   };
   const canonicalStr = canonicalJson(helloMsg);
   const canonicalBytes = new TextEncoder().encode(canonicalStr);

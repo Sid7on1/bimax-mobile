@@ -1,4 +1,16 @@
 import {
+  PairingAttemptScope,
+  sameDesktopTrust,
+  matchesDesktopSession,
+} from "@bimax/core/session/attempt";
+import { isPqAdvertisement } from "@bimax/core/crypto/pq";
+import { buildTransportConfirmation } from "@bimax/core/session/lifecycle";
+import { PqPrekeyLookup } from "@bimax/core/session/prekey-lookup";
+import { randomId } from "../crypto/keys";
+import { requireActiveAccount, isActiveAccount } from "../account-scope";
+import { authorizeRelayUrl } from "../gateway";
+import { pendingOperations, acknowledgeOperation } from "../operation-outbox";
+import {
   createContext,
   useContext,
   useEffect,
@@ -7,7 +19,6 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import * as LocalAuthentication from "expo-local-authentication";
 import type {
   Envelope,
   MessageKind,
@@ -18,11 +29,8 @@ import type {
   EncryptedPayload,
   AgentStatus,
   AgentSessionInfo,
-  SessionList,
-  CommandRequest,
-  CommandResult,
-  KillRequest,
   KillResult,
+  ChatDone,
 } from "@bimax/protocol";
 import { RelayClient, type ClientStatus, type WsImpl } from "../relay/client";
 import {
@@ -42,21 +50,11 @@ import {
   type TrustedDesktop,
 } from "../crypto";
 import { PairingManager, type EstablishedSession } from "./session";
-import {
-  addApproval,
-  getPending,
-  removeApproval,
-  buildApprovalDecision,
-  signApprovalDecision,
-  decideWithBiometric,
-} from "../approvals";
-import {
-  seal,
-  open,
-  newE2EState,
-  type E2EState,
-  type OpenResult,
-} from "../e2e";
+import { addApproval, getPending } from "../approvals";
+import { seal, open, newE2EState, type E2EState, type OpenResult } from "../e2e";
+import { dispatchIncomingEnvelope } from "./incoming";
+import { probeTrustedRelay } from "./connection";
+import { useRemoteActions } from "./use-remote-actions";
 
 export interface CommandLogEntry {
   idempotencyKey: string;
@@ -66,10 +64,39 @@ export interface CommandLogEntry {
   at: number;
 }
 
+export interface RemoteChatOptions {
+  text: string;
+  sessionId?: string;
+  fileIds?: string[];
+  onToken?: (token: string, seq: number) => void;
+}
+
+export interface RemoteFileInput {
+  name: string;
+  mime: string;
+  bytes: Uint8Array;
+}
+
+export interface PendingRemoteChat {
+  onToken?: (token: string, seq: number) => void;
+  resolve: (done: ChatDone) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export interface PendingFileTransfer {
+  bytes: Uint8Array;
+  onAccepted: () => void;
+  resolve: (fileId: string) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export interface RelayContextValue {
   status: ClientStatus | "idle";
+  connectionError: string | null;
   trustedDesktop: TrustedDesktop | null;
-  refreshTrustedDesktop: () => Promise<void>;
+  refreshTrustedDesktop: (verified: EstablishedSession) => Promise<void>;
   sessions: EstablishedSession[];
   getSession: (peerId: string) => EstablishedSession | undefined;
   dropSession: (peerDeviceId: string) => void;
@@ -81,9 +108,11 @@ export interface RelayContextValue {
   agentStatus: AgentStatus | null;
   remoteSessions: AgentSessionInfo[];
   commandLog: CommandLogEntry[];
-  sendInstruction: (instruction: string) => void;
+  sendInstruction: (instruction: string) => Promise<void>;
+  sendRemoteChat: (options: RemoteChatOptions) => Promise<ChatDone>;
+  sendRemoteFile: (file: RemoteFileInput) => Promise<string>;
   requestSessionList: () => void;
-  sendKill: (reason?: string) => void;
+  sendKill: (reason?: string) => Promise<void>;
   lastKillAck: KillResult | null;
 }
 
@@ -103,9 +132,13 @@ interface UserPairing {
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   attemptId: number;
+  isCurrent: () => boolean;
+  finish: () => void;
 }
 
 export function RelayProvider({ children }: { children: ReactNode }) {
+  const owner = requireActiveAccount();
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [status, setStatus] = useState<ClientStatus | "idle">("idle");
   const [trustedDesktop, setTrustedDesktop] = useState<TrustedDesktop | null>(null);
   const [lastKillAck, setLastKillAck] = useState<KillResult | null>(null);
@@ -124,12 +157,20 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   const clientRef = useRef<RelayClient | null>(null);
   const clientUrlRef = useRef<string | null>(null);
   const userPairingsRef = useRef(new Map<string, UserPairing>());
+  const pendingChatsRef = useRef(new Map<string, PendingRemoteChat>());
+  const pendingFilesRef = useRef(new Map<string, PendingFileTransfer>());
   const attemptCountersRef = useRef<Map<string, number>>(new Map());
   const rehandshakePairingRef = useRef<{
     attemptId: number;
     manager: PairingManager;
+    request: Envelope<"pairing_request", PairingRequest>;
+    startedAt: number;
+    isCurrent: () => boolean;
+    finish: () => void;
   } | null>(null);
-  const abandonedManagersRef = useRef<PairingManager[]>([]);
+  const userScopeRef = useRef(new PairingAttemptScope());
+  const recoveryScopeRef = useRef(new PairingAttemptScope());
+  const aliveRef = useRef(false);
 
   const getNextAttemptId = useCallback((peerDeviceId: string): number => {
     const current = attemptCountersRef.current.get(peerDeviceId) ?? 0;
@@ -139,10 +180,16 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const deviceIdRef = useRef<string>("");
+  const ownedPrivateKeys = useRef(new Set<Uint8Array>());
   const staticKeypairRef = useRef<{ publicKey: Uint8Array; privateKey: Uint8Array } | null>(null);
   const trustedRef = useRef<TrustedDesktop | null>(null);
+  const prekeyLookupRef = useRef(new PqPrekeyLookup());
 
   const sessionsRef = useRef<EstablishedSession[]>([]);
+  const recoverRef = useRef<() => void>(() => {});
+  const lastFlushRef = useRef(0);
+  const flushRef = useRef<() => Promise<void>>(async () => {});
+  const candidatesRef = useRef(new Map<string, EstablishedSession>());
   const e2eStateRef = useRef(new Map<string, E2EState>());
 
   const getE2EState = useCallback((peerId: string): E2EState => {
@@ -156,249 +203,249 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setPendingApprovals(getPending());
+      const next = getPending();
+      setPendingApprovals((prev) =>
+        prev.length === next.length &&
+        prev.every((item, idx) => item.approvalId === next[idx]?.approvalId)
+          ? prev
+          : next,
+      );
     }, 1000);
     return () => clearInterval(timer);
   }, []);
 
   const handleIncoming = useCallback(
-    (env: Envelope<MessageKind, unknown>) => {
-      if (env.kind === "encrypted") {
-        const encPayload = env.payload as EncryptedPayload | null | undefined;
-        if (
-          !encPayload ||
-          typeof encPayload !== "object" ||
-          typeof encPayload.ciphertext !== "string"
-        ) {
-          return;
-        }
-
-        const session = sessionsRef.current.find(
-          (s) => s.peerDeviceId === env.from,
-        );
-        if (!session) {
-          return;
-        }
-
-        const state = getE2EState(env.from);
-        let result: OpenResult;
-        try {
-          result = open(session, state, {
-            id: env.id,
-            from: env.from,
-            to: deviceIdRef.current,
-            kind: env.kind,
-            ciphertextB64: encPayload.ciphertext,
-          });
-        } catch {
-          return;
-        }
-
-        if (result.duplicate) {
-          return;
-        }
-
-        handleIncoming({
-          v: env.v,
-          id: env.id,
-          ts: env.ts,
-          from: env.from,
-          to: deviceIdRef.current,
-          kind: result.innerKind,
-          payload: result.body,
-        });
-        return;
-      }
-
-      if (env.kind === "pairing_grant") {
-        const grantEnv = env as Envelope<"pairing_grant", PairingGrant>;
-        const peerId = grantEnv.from;
-
-        // Check if this grant was for a superseded/abandoned attempt; if so, drop silently
-        for (let i = abandonedManagersRef.current.length - 1; i >= 0; i--) {
-          const abandonedMgr = abandonedManagersRef.current[i];
-          if (abandonedMgr.hasPendingPairing(peerId)) {
-            try {
-              abandonedMgr.handleGrant(grantEnv);
-              // Silently drop grants for superseded attempts
-              abandonedManagersRef.current.splice(i, 1);
-              return;
-            } catch {
-              // Not for this abandoned attempt
+    (env: Envelope<MessageKind, unknown>, authenticated = false) => {
+      if (!isActiveAccount(owner)) return;
+      if (prekeyLookupRef.current.handle(env, deviceIdRef.current)) return;
+      dispatchIncomingEnvelope(
+        env,
+        {
+          owner,
+          isActiveAccount,
+          deviceId: deviceIdRef.current,
+          trustedDesktopId: trustedRef.current?.deviceId,
+          onPresence: (deviceId, presenceStatus) => {
+            if (presenceStatus === "offline") {
+              for (const s of sessionsRef.current) {
+                if (s.peerDeviceId === deviceId) s.destroy?.();
+              }
+              sessionsRef.current = [];
+              setSessions([]);
+            } else if (presenceStatus === "online") {
+              recoverRef.current();
             }
-          }
-        }
-
-        const userPending = userPairingsRef.current.get(peerId);
-        const rehandshakePending =
-          rehandshakePairingRef.current &&
-          rehandshakePairingRef.current.manager.hasPendingPairing(peerId)
-            ? rehandshakePairingRef.current
-            : null;
-
-        if (!userPending && !rehandshakePending) {
-          return;
-        }
-
-        // Route only to the pending attempt with the highest attempt id for that device
-        const userAttemptId = userPending?.attemptId ?? -1;
-        const rehandshakeAttemptId = rehandshakePending?.attemptId ?? -1;
-
-        const isUser = userAttemptId >= rehandshakeAttemptId;
-        const manager = isUser
-          ? userPending!.manager
-          : rehandshakePending!.manager;
-
-        try {
-          const session = manager.handleGrant(grantEnv);
-          // Contract §5: fresh Noise session keys => fresh E2E replay space.
-          // Reset send/recv sequence state for this peer on EVERY new session.
-          e2eStateRef.current.set(peerId, newE2EState());
-          setSessions((prev) => {
-            const next = [
-              ...prev.filter((s) => s.peerDeviceId !== peerId),
-              session,
-            ];
-            sessionsRef.current = next;
-            return next;
-          });
-          if (isUser && userPending) {
-            clearTimeout(userPending.timer);
-            userPairingsRef.current.delete(peerId);
-            userPending.resolve(session);
-          } else if (!isUser) {
-            rehandshakePairingRef.current = null;
-          }
-        } catch (err) {
-          setSessions((prev) => {
-            const next = prev.filter((s) => s.peerDeviceId !== peerId);
-            sessionsRef.current = next;
-            return next;
-          });
-          if (isUser && userPending) {
-            clearTimeout(userPending.timer);
-            userPairingsRef.current.delete(peerId);
-            userPending.reject(
-              err instanceof Error ? err : new Error("Pairing failed"),
-            );
-          } else if (!isUser) {
-            rehandshakePairingRef.current = null;
-          }
-        }
-      } else if (env.kind === "approval_request") {
-        try {
-          addApproval(env.payload as ToolApprovalRequest);
-          setPendingApprovals(getPending());
-        } catch {
-          // ignore duplicate or malformed
-        }
-      } else if (env.kind === "agent_status") {
-        const statusPayload = env.payload as AgentStatus | null | undefined;
-        if (
-          statusPayload &&
-          typeof statusPayload === "object" &&
-          (statusPayload.state === "idle" ||
-            statusPayload.state === "working" ||
-            statusPayload.state === "waiting_approval" ||
-            statusPayload.state === "error")
-        ) {
-          setAgentStatus({
-            state: statusPayload.state,
-            sessionId:
-              typeof statusPayload.sessionId === "string"
-                ? statusPayload.sessionId.slice(0, 100)
-                : undefined,
-            taskSummary:
-              typeof statusPayload.taskSummary === "string"
-                ? statusPayload.taskSummary.slice(0, 200)
-                : undefined,
-            updatedAt:
-              typeof statusPayload.updatedAt === "number" &&
-              Number.isFinite(statusPayload.updatedAt)
-                ? statusPayload.updatedAt
-                : Date.now(),
-          });
-        }
-      } else if (env.kind === "session_list") {
-        const listPayload = env.payload as SessionList | null | undefined;
-        if (listPayload && Array.isArray(listPayload.sessions)) {
-          const valid: AgentSessionInfo[] = [];
-          for (const item of listPayload.sessions) {
+          },
+          onEncrypted: (outerEnv) => {
+            const encPayload = outerEnv.payload as EncryptedPayload | null | undefined;
             if (
-              item &&
-              typeof item === "object" &&
-              typeof item.sessionId === "string" &&
-              item.sessionId.length > 0 &&
-              typeof item.title === "string" &&
-              (item.status === "idle" ||
-                item.status === "working" ||
-                item.status === "waiting_approval" ||
-                item.status === "error")
+              !encPayload ||
+              typeof encPayload !== "object" ||
+              typeof encPayload.ciphertext !== "string"
             ) {
-              valid.push({
-                sessionId: item.sessionId.slice(0, 100),
-                title: item.title.slice(0, 200),
-                status: item.status,
-                startedAt:
-                  typeof item.startedAt === "number" &&
-                  Number.isFinite(item.startedAt)
-                    ? item.startedAt
-                    : Date.now(),
-              });
-              if (valid.length >= 50) break;
+              return;
             }
-          }
-          setRemoteSessions(valid);
-        }
-      } else if (env.kind === "command_result") {
-        const resultPayload = env.payload as CommandResult | null | undefined;
-        if (
-          resultPayload &&
-          typeof resultPayload === "object" &&
-          typeof resultPayload.idempotencyKey === "string"
-        ) {
-          const key = resultPayload.idempotencyKey;
-          const newStatus = resultPayload.ok ? "acked" : "failed";
-          const summary =
-            typeof resultPayload.summary === "string"
-              ? resultPayload.summary.slice(0, 300)
-              : undefined;
-          setCommandLog((prev) =>
-            prev.map((entry) =>
-              entry.idempotencyKey === key
-                ? { ...entry, status: newStatus, summary }
-                : entry,
-            ),
-          );
-        }
-      } else if (env.kind === "kill_result") {
-        const killPayload = env.payload as KillResult | null | undefined;
-        if (
-          killPayload &&
-          typeof killPayload === "object" &&
-          typeof killPayload.idempotencyKey === "string" &&
-          killPayload.idempotencyKey.length > 0 &&
-          typeof killPayload.ok === "boolean"
-        ) {
-          const detail =
-            typeof killPayload.detail === "string"
-              ? killPayload.detail.slice(0, 300)
-              : undefined;
-          const at =
-            typeof killPayload.at === "number" &&
-            Number.isFinite(killPayload.at)
-              ? killPayload.at
-              : Date.now();
-          setLastKillAck({
-            idempotencyKey: killPayload.idempotencyKey,
-            ok: killPayload.ok,
-            detail,
-            at,
-          });
-        }
-      }
+            const session = sessionsRef.current.find((s) => s.peerDeviceId === outerEnv.from);
+            if (!session) return;
+
+            const state = getE2EState(outerEnv.from);
+            let result: OpenResult;
+            try {
+              result = open(session, state, {
+                id: outerEnv.id,
+                from: outerEnv.from,
+                to: deviceIdRef.current,
+                kind: outerEnv.kind,
+                ciphertextB64: encPayload.ciphertext,
+              });
+            } catch {
+              session.destroy?.();
+              sessionsRef.current = [];
+              setSessions([]);
+              recoveryScopeRef.current.cancel();
+              rehandshakePairingRef.current?.manager.destroy();
+              rehandshakePairingRef.current = null;
+              recoverRef.current();
+              return;
+            }
+            if (result.duplicate) return;
+
+            handleIncoming(
+              {
+                v: outerEnv.v,
+                id: outerEnv.id,
+                ts: outerEnv.ts,
+                from: outerEnv.from,
+                to: deviceIdRef.current,
+                kind: result.innerKind,
+                payload: result.body,
+              },
+              true,
+            );
+          },
+          onPairingGrant: (rawGrant) => {
+            const grantEnv = rawGrant as Envelope<"pairing_grant", PairingGrant>;
+            const peerId = grantEnv.from;
+
+            const userPending = userPairingsRef.current.get(peerId);
+            const rehandshakePending =
+              rehandshakePairingRef.current &&
+              rehandshakePairingRef.current.manager.hasPendingPairing(peerId)
+                ? rehandshakePairingRef.current
+                : null;
+
+            if (!userPending && !rehandshakePending) return;
+
+            const userAttemptId = userPending?.attemptId ?? -1;
+            const rehandshakeAttemptId = rehandshakePending?.attemptId ?? -1;
+            const isUser = userAttemptId >= rehandshakeAttemptId;
+            const attempt = isUser ? userPending! : rehandshakePending!;
+            const manager = attempt.manager;
+            if (!attempt.isCurrent() || !manager.matchesPendingGrant(grantEnv)) return;
+
+            try {
+              const session = manager.handleGrant(grantEnv);
+              setConnectionError(null);
+              if (!isUser && session.nextPqPrekey && trustedRef.current) {
+                const updated = {
+                  ...trustedRef.current,
+                  cryptoVersion: 2 as const,
+                  nextPqPrekey: session.nextPqPrekey,
+                };
+                trustedRef.current = updated;
+                setTrustedDesktop(updated);
+                void saveTrustedDesktop(updated).catch(() =>
+                  setConnectionError(
+                    "Could not save the next secure reconnect key. Scan a fresh QR code if reconnect fails.",
+                  ),
+                );
+              }
+              if (session.requiresConfirmation) {
+                clientRef.current!.send(buildTransportConfirmation(session, deviceIdRef.current));
+              }
+              e2eStateRef.current.set(peerId, newE2EState());
+              if (isUser) {
+                candidatesRef.current.set(peerId, session);
+              } else {
+                const next = [
+                  ...sessionsRef.current.filter((s) => s.peerDeviceId !== peerId),
+                  session,
+                ];
+                sessionsRef.current = next;
+                setSessions(next);
+                void flushRef.current();
+              }
+              if (isUser && userPending) {
+                clearTimeout(userPending.timer);
+                // Keep the lease until human verification commits or cancels trust.
+                userPairingsRef.current.delete(peerId);
+                userPending.resolve(session);
+              } else if (!isUser) {
+                rehandshakePending?.finish();
+                rehandshakePairingRef.current = null;
+              }
+            } catch (err) {
+              manager.destroy();
+              setSessions((prev) => {
+                const next = prev.filter((s) => s.peerDeviceId !== peerId);
+                sessionsRef.current = next;
+                return next;
+              });
+              if (isUser && userPending) {
+                clearTimeout(userPending.timer);
+                userPending.finish();
+                userPairingsRef.current.delete(peerId);
+                userPending.reject(err instanceof Error ? err : new Error("Pairing failed"));
+              } else if (!isUser) {
+                rehandshakePending?.finish();
+                rehandshakePairingRef.current = null;
+              }
+            }
+          },
+          onApprovalRequest: (req) => {
+            try {
+              addApproval(req);
+              setPendingApprovals(getPending());
+            } catch {
+              // ignore duplicate or malformed
+            }
+          },
+          onApprovalResult: (approvalId) => {
+            void acknowledgeOperation(`approval-${approvalId}`);
+          },
+          onAgentStatus: (nextStatus) => {
+            setAgentStatus(nextStatus);
+          },
+          onSessionList: (validSessions) => {
+            setRemoteSessions(validSessions);
+          },
+          onCommandResult: ({ idempotencyKey, status: cmdStatus, summary }) => {
+            void acknowledgeOperation(idempotencyKey);
+            setCommandLog((prev) =>
+              prev.map((entry) =>
+                entry.idempotencyKey === idempotencyKey
+                  ? { ...entry, status: cmdStatus, summary }
+                  : entry,
+              ),
+            );
+          },
+          onKillResult: (killAck) => {
+            void acknowledgeOperation(killAck.idempotencyKey);
+            setLastKillAck(killAck);
+          },
+          onChatToken: (token) => {
+            const pending = pendingChatsRef.current.get(token.idempotencyKey);
+            pending?.onToken?.(token.token, token.seq);
+          },
+          onChatDone: (done) => {
+            void acknowledgeOperation(done.idempotencyKey);
+            const pending = pendingChatsRef.current.get(done.idempotencyKey);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pendingChatsRef.current.delete(done.idempotencyKey);
+              if (done.ok) {
+                pending.resolve(done);
+              } else {
+                pending.reject(new Error(done.error ?? "Remote chat failed"));
+              }
+            }
+          },
+          onFileAccept: ({ transferId }) => {
+            const pending = pendingFilesRef.current.get(transferId);
+            pending?.onAccepted();
+          },
+          onFileReject: ({ transferId, reason }) => {
+            const pending = pendingFilesRef.current.get(transferId);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pending.bytes.fill(0);
+              pendingFilesRef.current.delete(transferId);
+              pending.reject(new Error(reason || "File transfer rejected by desktop"));
+            }
+          },
+          onFileReceived: ({ transferId, fileId }) => {
+            const pending = pendingFilesRef.current.get(transferId);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pending.bytes.fill(0);
+              pendingFilesRef.current.delete(transferId);
+              pending.resolve(fileId);
+            }
+          },
+          onFileError: ({ transferId, message }) => {
+            const pending = pendingFilesRef.current.get(transferId);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pending.bytes.fill(0);
+              pendingFilesRef.current.delete(transferId);
+              pending.reject(new Error(message || "File transfer failed"));
+            }
+          },
+        },
+        authenticated,
+      );
     },
-    [getE2EState],
+    [getE2EState, owner],
   );
 
   const connectToRelay = useCallback(
@@ -416,6 +463,8 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       }
       const client = new RelayClient({
         url: relayUrl,
+        authorizeUrl: (url) =>
+          authorizeRelayUrl(url, deviceIdRef.current, helloSignerRef.current!.pubkeyB64),
         deviceId: deviceIdRef.current,
         role: "mobile",
         wsImpl: ((): WsImpl => {
@@ -428,8 +477,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         onStatus: (s) => {
           statusRef.current = s;
           setStatus(s);
+          if (s !== "online") {
+            for (const session of sessionsRef.current) session.destroy?.();
+            sessionsRef.current = [];
+            setSessions([]);
+            e2eStateRef.current.clear();
+          } else if (trustedRef.current) recoverRef.current();
         },
-        onMessage: handleIncoming,
+        onMessage: (env) => handleIncoming(env),
       });
       clientRef.current = client;
       clientUrlRef.current = relayUrl;
@@ -441,27 +496,23 @@ export function RelayProvider({ children }: { children: ReactNode }) {
 
   const sendEncrypted = useCallback(
     (to: string, kind: MessageKind, payload: unknown): void => {
-      if (!clientRef.current) {
-        throw new Error("sendEncrypted: relay client is not connected");
+      if (!clientRef.current || statusRef.current !== "online") {
+        throw new Error("Desktop channel is not ready");
       }
       const session = sessionsRef.current.find((s) => s.peerDeviceId === to);
       if (!session) {
         throw new Error(`sendEncrypted: no established session for peer ${to}`);
       }
       const state = getE2EState(to);
-      const randomId =
-        "m-" +
-        Math.random().toString(36).slice(2) +
-        "-" +
-        Date.now().toString(36);
+      const envelopeId = randomId();
       const outer = {
-        id: randomId,
+        id: envelopeId,
         from: deviceIdRef.current,
         to,
       };
       const ciphertext = seal(session, state, kind, payload, outer);
       const env: Envelope<"encrypted", EncryptedPayload> = {
-        v: 1,
+        v: 2,
         id: outer.id,
         ts: Date.now(),
         from: outer.from,
@@ -481,242 +532,357 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     [sessions],
   );
 
-  const dropSession = useCallback((peerDeviceId: string): void => {
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.peerDeviceId !== peerDeviceId);
+  const dropSession = useCallback(
+    (peerDeviceId: string): void => {
+      userScopeRef.current.cancel();
+      recoveryScopeRef.current.cancel();
+      prekeyLookupRef.current.destroy();
+      rehandshakePairingRef.current?.manager.destroy();
+      rehandshakePairingRef.current = null;
+      candidatesRef.current.get(peerDeviceId)?.destroy?.();
+      candidatesRef.current.delete(peerDeviceId);
+      const pending = userPairingsRef.current.get(peerDeviceId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        pending.manager.destroy();
+        pending.finish();
+        pending.reject(new Error("Pairing cancelled"));
+        userPairingsRef.current.delete(peerDeviceId);
+      }
+      for (const session of sessionsRef.current)
+        if (session.peerDeviceId === peerDeviceId) session.destroy?.();
+      const next = sessionsRef.current.filter((session) => session.peerDeviceId !== peerDeviceId);
       sessionsRef.current = next;
-      return next;
-    });
-  }, []);
+      setSessions(next);
+      const trusted = trustedRef.current;
+      if (trusted) {
+        rehandshakePairingRef.current = null;
+        connectToRelay(
+          trusted.lastWorking === "lan" && trusted.lanRelayUrl
+            ? trusted.lanRelayUrl
+            : trusted.relayUrl,
+        );
+        recoverRef.current();
+      }
+    },
+    [connectToRelay],
+  );
+
+  const getEd25519PrivateKey = useCallback(async (): Promise<Uint8Array> => {
+    let privB64 = await loadDeviceKey(BIMAX_ED25519_PRIV, owner);
+    if (!privB64) {
+      if (requireActiveAccount() !== owner) throw new Error("Account changed");
+      await getOrCreateEd25519Keypair();
+      privB64 = await loadDeviceKey(BIMAX_ED25519_PRIV, owner);
+    }
+    if (!privB64) {
+      throw new Error("Failed to load or generate Ed25519 private key");
+    }
+    const key = base64ToBytes(privB64);
+    if (!isActiveAccount(owner)) {
+      key.fill(0);
+      throw new Error("Account changed");
+    }
+    ownedPrivateKeys.current.add(key);
+    return key;
+  }, [owner]);
 
   const pairWithDesktop = useCallback(
-    (advert: PairingAdvertisement): Promise<EstablishedSession> => {
+    async (advert: PairingAdvertisement): Promise<EstablishedSession> => {
       const keypair = staticKeypairRef.current;
       const deviceId = deviceIdRef.current;
       if (!keypair || !deviceId) {
         return Promise.reject(new Error("Device identity not loaded yet"));
       }
 
-      // Precedence rule: user-initiated pairing wins.
-      // (Desktop contract: a desktop MUST only grant the most recent
-      // pairing_request per mobile deviceId; earlier ones are superseded.)
-      if (
-        rehandshakePairingRef.current &&
-        rehandshakePairingRef.current.manager.hasPendingPairing(advert.desktopDeviceId)
-      ) {
-        abandonedManagersRef.current.push(rehandshakePairingRef.current.manager);
-        rehandshakePairingRef.current = null;
+      const lease = userScopeRef.current.begin();
+      for (const candidate of candidatesRef.current.values()) candidate.destroy?.();
+      candidatesRef.current.clear();
+      recoveryScopeRef.current.cancel();
+      rehandshakePairingRef.current?.manager.destroy();
+      rehandshakePairingRef.current = null;
+      for (const existing of userPairingsRef.current.values()) {
+        clearTimeout(existing.timer);
+        existing.manager.destroy();
+        existing.reject(new Error("Superseded by a newer pairing attempt"));
       }
+      userPairingsRef.current.clear();
+      const attemptId = getNextAttemptId(advert.desktopDeviceId);
+      const isCurrent = () => aliveRef.current && isActiveAccount(owner) && lease.isCurrent();
 
-      // If a previous user pairing is in flight for this desktop, abandon it as well
-      const existingUser = userPairingsRef.current.get(advert.desktopDeviceId);
-      if (existingUser) {
-        clearTimeout(existingUser.timer);
-        existingUser.reject(new Error("Superseded by a newer pairing attempt"));
-        abandonedManagersRef.current.push(existingUser.manager);
-        // Bound the abandoned list; entries whose grants never arrive are dropped.
-        while (abandonedManagersRef.current.length > 10) {
-          abandonedManagersRef.current.shift();
-        }
-        userPairingsRef.current.delete(advert.desktopDeviceId);
+      let client: RelayClient;
+      try {
+        client = connectToRelay(advert.relayUrl);
+      } catch (error) {
+        lease.finish();
+        throw error;
       }
-
-      const client = connectToRelay(advert.relayUrl);
-      const manager = new PairingManager({ deviceId, staticKeypair: keypair });
+      let signingKey: Uint8Array | undefined;
+      let manager: PairingManager | undefined;
       let reqEnv: Envelope<"pairing_request", PairingRequest>;
       try {
-        reqEnv = manager.beginPairing(advert);
+        signingKey = await getEd25519PrivateKey();
+        if (!isCurrent()) throw new Error("Pairing attempt was cancelled");
+        manager = new PairingManager({
+          deviceId,
+          staticKeypair: keypair,
+          helloKeypair: { privateKey: signingKey, publicKey: ed25519GetPublicKey(signingKey) },
+        });
+        const publicKey = isPqAdvertisement(advert)
+          ? await prekeyLookupRef.current.fetch(advert, deviceId, (env) => client.send(env))
+          : undefined;
+        if (!isCurrent()) throw new Error("Pairing attempt was cancelled");
+        reqEnv = manager.beginPairing(advert, publicKey);
       } catch (err) {
-        return Promise.reject(
-          err instanceof Error ? err : new Error("beginPairing failed"),
-        );
+        manager?.destroy();
+        lease.finish();
+        return Promise.reject(err instanceof Error ? err : new Error("beginPairing failed"));
+      } finally {
+        signingKey?.fill(0);
+        if (signingKey) ownedPrivateKeys.current.delete(signingKey);
       }
-      const attemptId = getNextAttemptId(advert.desktopDeviceId);
+      if (!manager) {
+        lease.finish();
+        throw new Error("Pairing manager initialization failed");
+      }
+      const pendingManager = manager;
+      const retryTimer = setInterval(() => {
+        if (isCurrent() && clientRef.current === client && statusRef.current === "online") {
+          try {
+            client.send(reqEnv);
+          } catch {
+            /* deadline handles a disconnected socket */
+          }
+        }
+      }, 2000);
       return new Promise<EstablishedSession>((resolve, reject) => {
         const timer = setTimeout(() => {
-          userPairingsRef.current.delete(advert.desktopDeviceId);
-          reject(
-            new Error(
-              "Pairing timed out after 60s waiting for desktop approval",
-            ),
-          );
+          if (userPairingsRef.current.get(advert.desktopDeviceId)?.attemptId === attemptId)
+            userPairingsRef.current.delete(advert.desktopDeviceId);
+          lease.finish();
+          pendingManager.destroy();
+          reject(new Error("Pairing timed out after 60s waiting for desktop approval"));
         }, 60000);
-        // NOTE: trust is established only after the user confirms the
-        // verification codes — pair.tsx calls refreshTrustedDesktop()
-        // after saveTrustedDesktop(). Never set trusted state here.
         userPairingsRef.current.set(advert.desktopDeviceId, {
-          manager,
+          manager: pendingManager,
           resolve,
           reject,
           timer,
           attemptId,
+          isCurrent,
+          finish: lease.finish,
         });
-        client.send(reqEnv);
-      });
+        try {
+          client.send(reqEnv);
+        } catch (error) {
+          clearTimeout(timer);
+          pendingManager.destroy();
+          lease.finish();
+          if (userPairingsRef.current.get(advert.desktopDeviceId)?.attemptId === attemptId)
+            userPairingsRef.current.delete(advert.desktopDeviceId);
+          reject(error instanceof Error ? error : new Error("Pairing send failed"));
+        }
+      }).finally(() => clearInterval(retryTimer));
     },
-    [connectToRelay, getNextAttemptId],
+    [connectToRelay, getNextAttemptId, getEd25519PrivateKey, owner],
   );
 
-  const refreshTrustedDesktop = useCallback(async (): Promise<void> => {
-    const trusted = await loadTrustedDesktop();
-    trustedRef.current = trusted;
-    setTrustedDesktop(trusted);
-  }, []);
-
-  const requireDesktopId = useCallback((): string => {
-    const desktopId = trustedRef.current?.deviceId;
-    if (!desktopId) {
-      throw new Error("No trusted desktop configured");
-    }
-    return desktopId;
-  }, []);
-
-  const sendInstruction = useCallback(
-    (instruction: string): void => {
-      const trimmed = instruction.trim();
-      if (trimmed.length === 0) {
-        throw new Error("Instruction cannot be empty");
-      }
-      if (trimmed.length > 4000) {
-        throw new Error("Instruction exceeds maximum length of 4000 characters");
-      }
-
-      const desktopId = requireDesktopId();
-      const idempotencyKey =
-        "cmd-" +
-        Math.random().toString(36).slice(2) +
-        "-" +
-        Date.now().toString(36);
-      const now = Date.now();
-
-      const req: CommandRequest = {
-        instruction: trimmed,
-        idempotencyKey,
-        sentAt: now,
-      };
-
-      const entry: CommandLogEntry = {
-        idempotencyKey,
-        instruction: trimmed,
-        status: "sent",
-        at: now,
-      };
-
-      setCommandLog((prev) => [...prev, entry].slice(-20));
+  const refreshTrustedDesktop = useCallback(
+    async (verified: EstablishedSession): Promise<void> => {
+      if (
+        !userScopeRef.current.busy ||
+        candidatesRef.current.get(verified.peerDeviceId) !== verified
+      )
+        throw new Error("Verified pairing was cancelled or superseded");
+      const isCurrent = userScopeRef.current.capture();
+      // A trust commit must fail closed, including when SecureStore read-back fails.
+      recoveryScopeRef.current.cancel();
+      rehandshakePairingRef.current?.manager.destroy();
+      rehandshakePairingRef.current = null;
+      trustedRef.current = null;
+      setTrustedDesktop(null);
+      for (const session of sessionsRef.current) session.destroy?.();
+      sessionsRef.current = [];
+      setSessions([]);
       try {
-        sendEncrypted(desktopId, "command_request", req);
-      } catch (err) {
-        setCommandLog((prev) =>
-          prev.map((e) =>
-            e.idempotencyKey === idempotencyKey
-              ? { ...e, status: "failed", summary: err instanceof Error ? err.message : "Send failed" }
-              : e,
-          ),
-        );
-        throw err;
+        const trusted = await loadTrustedDesktop();
+        if (
+          !aliveRef.current ||
+          !isActiveAccount(owner) ||
+          !isCurrent() ||
+          candidatesRef.current.get(verified.peerDeviceId) !== verified
+        )
+          throw new Error("Pairing was cancelled or superseded while loading trust");
+        if (!trusted || !matchesDesktopSession(trusted, verified))
+          throw new Error("Verified session does not match saved desktop trust");
+        trustedRef.current = trusted;
+        setTrustedDesktop(trusted);
+        userScopeRef.current.cancel();
+        candidatesRef.current.delete(verified.peerDeviceId);
+        sessionsRef.current = [verified];
+        setSessions([verified]);
+        void flushRef.current();
+      } catch (error) {
+        if (isCurrent()) {
+          userScopeRef.current.cancel();
+          for (const candidate of candidatesRef.current.values()) candidate.destroy?.();
+          candidatesRef.current.clear();
+        }
+        throw error;
       }
     },
-    [requireDesktopId, sendEncrypted],
+    [owner],
   );
 
-  const requestSessionList = useCallback((): void => {
-    const desktopId = requireDesktopId();
-    sendEncrypted(desktopId, "session_list_request", {});
-  }, [requireDesktopId, sendEncrypted]);
+  const {
+    sendInstruction,
+    sendRemoteChat,
+    sendRemoteFile,
+    requestSessionList,
+    sendKill,
+    approve,
+    deny,
+  } = useRemoteActions({
+    owner,
+    trustedRef,
+    statusRef,
+    sessionsRef,
+    ownedPrivateKeys,
+    pendingChatsRef,
+    pendingFilesRef,
+    pendingApprovals,
+    setPendingApprovals,
+    setCommandLog,
+    setLastKillAck,
+    sendEncrypted,
+    getEd25519PrivateKey,
+  });
 
-  const sendKill = useCallback(
-    (reason?: string): void => {
-      const desktopId = requireDesktopId();
-      const idempotencyKey = "kill-" + Math.random().toString(36).slice(2);
-      const req: KillRequest = {
-        idempotencyKey,
-        reason,
-        sentAt: Date.now(),
-      };
-      setLastKillAck(null);
-      sendEncrypted(desktopId, "kill_request", req);
-    },
-    [requireDesktopId, sendEncrypted],
-  );
-
-  const getEd25519PrivateKey = async (): Promise<Uint8Array> => {
-    let privB64 = await loadDeviceKey(BIMAX_ED25519_PRIV);
-    if (!privB64) {
-      await getOrCreateEd25519Keypair();
-      privB64 = await loadDeviceKey(BIMAX_ED25519_PRIV);
+  flushRef.current = async () => {
+    if (requireActiveAccount() !== owner) return;
+    const peer = trustedRef.current?.deviceId;
+    if (
+      !peer ||
+      statusRef.current !== "online" ||
+      !sessionsRef.current.some((s) => s.peerDeviceId === peer)
+    )
+      return;
+    if (Date.now() - lastFlushRef.current < 2000) return;
+    lastFlushRef.current = Date.now();
+    for (const operation of (await pendingOperations(peer)).slice(0, 8)) {
+      if (operation.expiresAt > Date.now()) sendEncrypted(peer, operation.kind, operation.body);
     }
-    if (!privB64) {
-      throw new Error("Failed to load or generate Ed25519 private key");
-    }
-    return base64ToBytes(privB64);
   };
-
-  const approve = useCallback(
-    async (approvalId: string): Promise<void> => {
-      const req = pendingApprovals.find((a) => a.approvalId === approvalId);
-      if (!req) {
-        throw new Error(`Approval request ${approvalId} not found`);
+  recoverRef.current = () => {
+    const trusted = trustedRef.current,
+      keypair = staticKeypairRef.current;
+    if (
+      !trusted ||
+      !keypair ||
+      statusRef.current !== "online" ||
+      userPairingsRef.current.has(trusted.deviceId)
+    )
+      return;
+    const pending = rehandshakePairingRef.current;
+    if (pending) {
+      if (!pending.isCurrent()) {
+        pending.manager.destroy();
+        pending.finish();
+        rehandshakePairingRef.current = null;
+        return;
       }
-      const desktopId = trustedRef.current?.deviceId;
-      if (!desktopId) {
-        throw new Error("No trusted desktop configured for approvals");
+      if (Date.now() - pending.startedAt >= 25_000) {
+        pending.manager.destroy();
+        pending.finish();
+        rehandshakePairingRef.current = null;
+        if (trusted.cryptoVersion === 2)
+          setConnectionError("Secure reconnect expired. Scan a fresh desktop QR code.");
+      } else {
+        try {
+          clientRef.current?.send(pending.request);
+        } catch {
+          /* retry on the next online tick */
+        }
       }
-
-      await decideWithBiometric({
-        requestBiometric: async () => {
-          const authRes = await LocalAuthentication.authenticateAsync({
-            promptMessage: `Approve ${req.tool}?`,
-            disableDeviceFallback: true,
-          });
-          return authRes.success;
-        },
-        build: () => buildApprovalDecision(req, "approved"),
-        sign: (unsigned) => ({ ...unsigned, signature: "" }),
-        onDecision: async (dec) => {
-          const privKey = await getEd25519PrivateKey();
-          const { signature: _sig, ...unsigned } = dec;
-          const signed = signApprovalDecision(unsigned, privKey);
-          // ORDER MATTERS: send first. decideWithBiometric now awaits this
-          // callback, so if the send throws, the error propagates and the
-          // approval stays pending for retry (it is NOT removed below).
-          sendEncrypted(desktopId, "approval_decision", signed);
-          removeApproval(approvalId);
-          setPendingApprovals(getPending());
-        },
-        onDenied: (reason) => {
-          throw new Error(`Biometric authentication failed: ${reason}`);
-        },
-      });
-    },
-    [pendingApprovals, sendEncrypted],
-  );
-
-  const deny = useCallback(
-    async (
-      approvalId: string,
-      reason?: "not_me" | "mistake",
-    ): Promise<void> => {
-      const req = pendingApprovals.find((a) => a.approvalId === approvalId);
-      if (!req) {
-        throw new Error(`Approval request ${approvalId} not found`);
+      return;
+    }
+    if (sessionsRef.current.some((s) => s.peerDeviceId === trusted.deviceId)) return;
+    if (userScopeRef.current.busy || recoveryScopeRef.current.busy) return;
+    const lease = recoveryScopeRef.current.begin();
+    const isCurrent = () =>
+      aliveRef.current &&
+      isActiveAccount(owner) &&
+      lease.isCurrent() &&
+      sameDesktopTrust(trustedRef.current, trusted);
+    void (async () => {
+      let privateKey: Uint8Array | undefined;
+      let signedManager: PairingManager | undefined;
+      try {
+        privateKey = await getEd25519PrivateKey();
+        if (!isCurrent() || statusRef.current !== "online" || rehandshakePairingRef.current) {
+          lease.finish();
+          return;
+        }
+        const pqAdvert = trusted.nextPqPrekey?.advertisement ?? trusted.nextPqAdvertisement;
+        if (trusted.cryptoVersion === 2 && !pqAdvert)
+          throw new Error("Secure reconnect needs a fresh desktop QR code.");
+        const pqPublicKey =
+          trusted.nextPqPrekey?.publicKey ??
+          (pqAdvert
+            ? await prekeyLookupRef.current.fetch(pqAdvert, deviceIdRef.current, (env) =>
+                clientRef.current!.send(env),
+              )
+            : undefined);
+        if (!isCurrent() || statusRef.current !== "online" || rehandshakePairingRef.current) {
+          lease.finish();
+          return;
+        }
+        signedManager = new PairingManager({
+          deviceId: deviceIdRef.current,
+          staticKeypair: keypair,
+          helloKeypair: { privateKey, publicKey: ed25519GetPublicKey(privateKey) },
+        });
+        const request = signedManager.beginPairing(
+          pqAdvert ?? {
+            relayUrl: clientUrlRef.current!,
+            ref: "rehandshake",
+            desktopDeviceId: trusted.deviceId,
+            desktopPublicKey: trusted.staticPublicKeyB64,
+            app: "bimax",
+          },
+          pqPublicKey,
+        );
+        rehandshakePairingRef.current = {
+          attemptId: getNextAttemptId(trusted.deviceId),
+          manager: signedManager,
+          request,
+          startedAt: Date.now(),
+          isCurrent,
+          finish: lease.finish,
+        };
+        clientRef.current?.send(request);
+      } catch (error) {
+        const report = isCurrent();
+        lease.finish();
+        signedManager?.destroy();
+        if (rehandshakePairingRef.current?.manager === signedManager)
+          rehandshakePairingRef.current = null;
+        if (report)
+          setConnectionError(
+            error instanceof Error
+              ? error.message
+              : "Secure reconnect failed. Scan a fresh desktop QR code.",
+          );
+      } finally {
+        privateKey?.fill(0);
+        if (privateKey) ownedPrivateKeys.current.delete(privateKey);
       }
-      const desktopId = trustedRef.current?.deviceId;
-      if (!desktopId) {
-        throw new Error("No trusted desktop configured for approvals");
-      }
-
-      const privKey = await getEd25519PrivateKey();
-      const unsigned = buildApprovalDecision(req, "denied", reason);
-      const signed = signApprovalDecision(unsigned, privKey);
-      sendEncrypted(desktopId, "approval_decision", signed);
-      removeApproval(approvalId);
-      setPendingApprovals(getPending());
-    },
-    [pendingApprovals, sendEncrypted],
-  );
-
+    })().catch(() => {});
+  };
   useEffect(() => {
+    aliveRef.current = true;
     let isMounted = true;
+    let signingPrivate: Uint8Array | null = null;
     async function init() {
       try {
         const deviceId = await getOrCreateDeviceId();
@@ -733,7 +899,11 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         };
 
         const edPrivKey = await getEd25519PrivateKey();
-        if (!isMounted) return;
+        if (!isMounted) {
+          edPrivKey.fill(0);
+          return;
+        }
+        signingPrivate = edPrivKey;
         const edPubBytes = ed25519GetPublicKey(edPrivKey);
         const edPubkeyB64 = bytesToBase64(edPubBytes);
         helloSignerRef.current = {
@@ -742,7 +912,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         };
 
         const trusted = await loadTrustedDesktop();
-        if (!isMounted) return;
+        if (!isMounted || userScopeRef.current.busy) return;
         trustedRef.current = trusted;
         setTrustedDesktop(trusted);
         if (!trusted) {
@@ -750,79 +920,30 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           setStatus("idle");
           return;
         }
-        const pairingManager = new PairingManager({
-          deviceId,
-          staticKeypair: staticKeypairRef.current,
+
+        const probeResult = await probeTrustedRelay({
+          trusted,
+          connectToRelay,
+          isOnline: () => statusRef.current === "online",
+          isMounted: () => isMounted,
         });
-
-        const candidateUrls: string[] =
-          trusted.lanRelayUrl && trusted.lastWorking !== "cloud"
-            ? [trusted.lanRelayUrl, trusted.relayUrl]
-            : [
-                trusted.relayUrl,
-                ...(trusted.lanRelayUrl ? [trusted.lanRelayUrl] : []),
-              ];
-
-        let winningClient: RelayClient | null = null;
-        let winningUrl: string | null = null;
-
-        for (const url of candidateUrls) {
-          if (!isMounted) return;
-          const client = connectToRelay(url);
-
-          const start = Date.now();
-          let isOnline = false;
-          while (Date.now() - start < 4000) {
-            if (!isMounted) return;
-            if (statusRef.current === "online") {
-              isOnline = true;
-              break;
-            }
-            await new Promise((r) => setTimeout(r, 150));
-          }
-
-          if (!isMounted) return;
-          if (isOnline) {
-            winningClient = client;
-            winningUrl = url;
-            break;
-          }
-        }
 
         if (!isMounted) return;
 
-        if (winningUrl && winningClient) {
-          const lastWorking: "lan" | "cloud" =
-            winningUrl === trusted.lanRelayUrl ? "lan" : "cloud";
-          const updatedTrusted = { ...trusted, lastWorking };
+        if (probeResult) {
+          if (!sameDesktopTrust(trustedRef.current, trusted)) return;
+          const { lastWorking } = probeResult;
+          // A fast reconnect may already have authenticated a newer one-time prekey.
+          const updatedTrusted = { ...(trustedRef.current ?? trusted), lastWorking };
           trustedRef.current = updatedTrusted;
           setTrustedDesktop(updatedTrusted);
           try {
-            await saveTrustedDesktop({
-              deviceId: trusted.deviceId,
-              staticPublicKeyB64: trusted.staticPublicKeyB64,
-              relayUrl: trusted.relayUrl,
-              lanRelayUrl: trusted.lanRelayUrl,
-              lastWorking,
-            });
+            await saveTrustedDesktop(updatedTrusted);
           } catch {
             // ignore save error
           }
 
-          const rehandshakeAdvert = {
-            relayUrl: winningUrl,
-            ref: "rehandshake-" + Math.random().toString(36).slice(2),
-            desktopDeviceId: trusted.deviceId,
-            desktopPublicKey: trusted.staticPublicKeyB64,
-            app: "bimax" as const,
-          };
-          const attemptId = getNextAttemptId(trusted.deviceId);
-          rehandshakePairingRef.current = {
-            attemptId,
-            manager: pairingManager,
-          };
-          const reqEnv = pairingManager.beginPairing(rehandshakeAdvert);
-          winningClient.send(reqEnv);
+          recoverRef.current();
         } else {
           if (clientRef.current) {
             try {
@@ -836,23 +957,63 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           statusRef.current = "idle";
           setStatus("idle");
         }
-      } catch {
+      } catch (error) {
         if (isMounted) {
+          setConnectionError(
+            error instanceof Error ? error.message : "Could not connect to desktop",
+          );
           statusRef.current = "idle";
           setStatus("idle");
           setTrustedDesktop(null);
         }
       }
     }
+    const prekeyLookup = prekeyLookupRef.current;
+    const userScope = userScopeRef.current;
+    const recoveryScope = recoveryScopeRef.current;
     const userPairings = userPairingsRef.current;
+    const pendingChats = pendingChatsRef.current;
+    const pendingFiles = pendingFilesRef.current;
+    const privateKeys = ownedPrivateKeys.current;
+    const candidates = candidatesRef.current;
+    const e2eStates = e2eStateRef.current;
     init();
     return () => {
       isMounted = false;
+      aliveRef.current = false;
+      userScope.cancel();
+      recoveryScope.cancel();
       for (const [, p] of userPairings) {
         clearTimeout(p.timer);
+        p.manager.destroy();
         p.reject(new Error("Provider unmounted"));
       }
       userPairings.clear();
+      for (const [, chat] of pendingChats) {
+        clearTimeout(chat.timer);
+        chat.reject(new Error("Provider unmounted"));
+      }
+      pendingChats.clear();
+      for (const [, file] of pendingFiles) {
+        clearTimeout(file.timer);
+        file.bytes.fill(0);
+        file.reject(new Error("Provider unmounted"));
+      }
+      pendingFiles.clear();
+      staticKeypairRef.current?.privateKey.fill(0);
+      staticKeypairRef.current = null;
+      signingPrivate?.fill(0);
+      for (const key of privateKeys) key.fill(0);
+      privateKeys.clear();
+      for (const session of sessionsRef.current) session.destroy?.();
+      for (const session of candidates.values()) session.destroy?.();
+      prekeyLookup.destroy();
+      rehandshakePairingRef.current?.manager.destroy();
+      candidates.clear();
+      e2eStates.clear();
+      helloSignerRef.current = null;
+      sessionsRef.current = [];
+      rehandshakePairingRef.current = null;
       if (clientRef.current) {
         try {
           clientRef.current.close();
@@ -863,10 +1024,50 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       }
       clientUrlRef.current = null;
     };
-  }, [connectToRelay, getNextAttemptId]);
+  }, [connectToRelay, getNextAttemptId, getEd25519PrivateKey]);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (statusRef.current === "online") {
+        recoverRef.current();
+        void flushRef.current().catch(() => {});
+        const peer = trustedRef.current?.deviceId;
+        if (peer && sessionsRef.current.some((s) => s.peerDeviceId === peer)) {
+          try {
+            sendEncrypted(peer, "session_list_request", {});
+          } catch {
+            /* reconnect will retry */
+          }
+        }
+      }
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [sendEncrypted]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (rehandshakePairingRef.current) recoverRef.current();
+    }, 2000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const expired = sessionsRef.current.some(
+        (session) =>
+          Date.now() - session.establishedAt >= 25 * 60_000 || session.needsRehandshake?.(),
+      );
+      if (!expired) return;
+      for (const session of sessionsRef.current) session.destroy?.();
+      sessionsRef.current = [];
+      setSessions([]);
+      recoverRef.current();
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, []);
   const value: RelayContextValue = {
     status,
+    connectionError,
     trustedDesktop,
     refreshTrustedDesktop,
     sessions,
@@ -881,6 +1082,8 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     remoteSessions,
     commandLog,
     sendInstruction,
+    sendRemoteChat,
+    sendRemoteFile,
     requestSessionList,
     sendKill,
     lastKillAck,

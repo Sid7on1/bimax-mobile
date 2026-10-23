@@ -108,7 +108,7 @@ try {
   tamperedMsg1[tamperedMsg1.length - 1] ^= 1;
   assert.throws(
     () => respTamper1.readMessage1(tamperedMsg1),
-    /authentication failed|chachaDecrypt/,
+    /authentication failed|chachaDecrypt|replay/,
     "responder must throw on tampered message1",
   );
 
@@ -127,7 +127,7 @@ try {
   tamperedMsg2[tamperedMsg2.length - 1] ^= 1;
   assert.throws(
     () => initTamper2.readMessage2(tamperedMsg2),
-    /authentication failed|chachaDecrypt/,
+    /authentication failed|chachaDecrypt|replay/,
     "initiator must throw on tampered message2",
   );
   console.log("PASS");
@@ -149,7 +149,7 @@ try {
   const msg1Wrong = initWrongPeer.writeMessage1(new TextEncoder().encode("wrong-peer-ref"));
   assert.throws(
     () => respWrongPeer.readMessage1(msg1Wrong),
-    /authentication failed|chachaDecrypt/,
+    /authentication failed|chachaDecrypt|replay/,
     "responder must throw when initiator configured with wrong remote key",
   );
   console.log("PASS");
@@ -286,7 +286,7 @@ try {
   // Attempt to decrypt the exact same ciphertext again: must throw (nonce advanced from 0 to 1)
   assert.throws(
     () => responder5.decrypt(ctSingle),
-    /authentication failed|chachaDecrypt/,
+    /authentication failed|chachaDecrypt|replay/,
     "decrypting same ciphertext again must throw due to advanced nonce",
   );
   console.log("PASS");

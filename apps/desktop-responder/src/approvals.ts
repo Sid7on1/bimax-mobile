@@ -1,10 +1,6 @@
 import type { ToolApprovalRequest, ApprovalDecision } from "@bimax/protocol";
 import type { EnginePort } from "./engine-port";
-import {
-  canonicalJson,
-  ed25519Verify,
-  sha256Bytes,
-} from "./crypto/keys";
+import { canonicalJson, ed25519Verify, sha256Bytes } from "./crypto/keys";
 import { bytesToBase64, base64ToBytes } from "./crypto/base64";
 
 export interface SecurityEvent {
@@ -39,6 +35,7 @@ export function constantTimeEqual(a: string, b: string): boolean {
 }
 
 export class ApprovalsGate {
+  private completed = new Map<string, { fingerprint: string; expiresAt: number }>();
   private pending = new Map<string, PendingApprovalRecord>();
   private enginePort: EnginePort;
   private getPinnedPhoneHelloPubkey: () => string | null;
@@ -59,7 +56,10 @@ export class ApprovalsGate {
     this.sweepTimer = setInterval(() => {
       this.sweepExpired();
     }, interval);
-    if (this.sweepTimer && typeof (this.sweepTimer as unknown as { unref?: () => void }).unref === "function") {
+    if (
+      this.sweepTimer &&
+      typeof (this.sweepTimer as unknown as { unref?: () => void }).unref === "function"
+    ) {
       (this.sweepTimer as unknown as { unref: () => void }).unref();
     }
   }
@@ -97,6 +97,14 @@ export class ApprovalsGate {
     }
 
     const { approvalId } = decision;
+    const previous = this.completed.get(approvalId);
+    if (previous && previous.expiresAt >= now) {
+      try {
+        return previous.fingerprint === canonicalJson(decision);
+      } catch {
+        return false;
+      }
+    }
     if (typeof approvalId !== "string" || !approvalId) {
       this.emitSecurity("approval_malformed", { reason: "missing approvalId" }, now);
       return false;
@@ -159,11 +167,7 @@ export class ApprovalsGate {
         throw new Error("pinned pubkey length is not 32 bytes");
       }
     } catch {
-      this.emitSecurity(
-        "approval_corrupt_pinned_pubkey",
-        { approvalId, pinnedPubkeyB64 },
-        now,
-      );
+      this.emitSecurity("approval_corrupt_pinned_pubkey", { approvalId, pinnedPubkeyB64 }, now);
       return false;
     }
 
@@ -179,7 +183,11 @@ export class ApprovalsGate {
         throw new Error("signature length is not 64 bytes");
       }
     } catch {
-      this.emitSecurity("approval_bad_signature", { approvalId, reason: "invalid signature bytes" }, now);
+      this.emitSecurity(
+        "approval_bad_signature",
+        { approvalId, reason: "invalid signature bytes" },
+        now,
+      );
       return false;
     }
 
@@ -189,7 +197,11 @@ export class ApprovalsGate {
 
     const sigValid = ed25519Verify(pubkeyBytes, unsignedBytes, sigBytes);
     if (!sigValid) {
-      this.emitSecurity("approval_bad_signature", { approvalId, reason: "signature verification failed" }, now);
+      this.emitSecurity(
+        "approval_bad_signature",
+        { approvalId, reason: "signature verification failed" },
+        now,
+      );
       return false;
     }
 
@@ -217,7 +229,12 @@ export class ApprovalsGate {
     ) {
       this.emitSecurity(
         "approval_skew_rejected",
-        { approvalId, decidedAt: decision.decidedAt, now, skew: Math.abs(now - decision.decidedAt) },
+        {
+          approvalId,
+          decidedAt: decision.decidedAt,
+          now,
+          skew: Math.abs(now - decision.decidedAt),
+        },
         now,
       );
       return false;
@@ -233,6 +250,11 @@ export class ApprovalsGate {
     }
 
     const verdict = decision.decision === "approved" ? "approved" : "denied";
+    this.completed.set(approvalId, {
+      fingerprint: canonicalJson(decision),
+      expiresAt: now + 300_000,
+    });
+    while (this.completed.size > 128) this.completed.delete(this.completed.keys().next().value!);
     this.enginePort.resolveApproval(approvalId, verdict, decision.denyReason);
     return true;
   }
@@ -263,6 +285,12 @@ export class ApprovalsGate {
     }
   }
 
+  public getPendingRequests(now = Date.now()): ToolApprovalRequest[] {
+    this.sweepExpired(now);
+    return [...this.pending.values()]
+      .filter((item) => !item.consumed)
+      .map((item) => item.storedObject);
+  }
   public getPending(approvalId: string): PendingApprovalRecord | undefined {
     return this.pending.get(approvalId);
   }
@@ -276,6 +304,7 @@ export class ApprovalsGate {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+    this.cancelForSession();
     this.pending.clear();
   }
 

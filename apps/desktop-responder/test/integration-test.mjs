@@ -182,6 +182,7 @@ async function main() {
   const desktopIdentity = createIdentity("desktop-dev-1");
   const responder = new Responder({
     identity: desktopIdentity,
+    hostControls:{setRemoteSessionActive:async()=>{},authorize:async()=>true},
     enginePort: fakeEngine,
     relayUrl,
     dataDir: path.join(tmpDir, "responder-data"),
@@ -317,8 +318,14 @@ async function main() {
   const phonePairingManager = new PhonePairingManager({
     deviceId: phoneDeviceId,
     staticKeypair: phoneX25519,
+    helloKeypair: phoneEd25519,
   });
 
+  const { canonicalJson } = require(path.join(mobileDistDir,"crypto","keys.js"));
+  function pairingPayload(ref, advert) {
+    const proof={pairingVersion:2,sentAt:Date.now(),mobileDeviceId:phoneDeviceId,ref,helloPubkey:bytesToBase64(phoneEd25519.publicKey),noisePublicKey:bytesToBase64(phoneX25519.publicKey),desktopPublicKey:advert.desktopPublicKey};
+    return new TextEncoder().encode(canonicalJson({...proof,signature:bytesToBase64(ed25519.sign(new TextEncoder().encode(canonicalJson(proof)),phoneEd25519.privateKey))}));
+  }
   function sendPhoneEncrypted(innerKind, body) {
     assert.ok(phoneSession, "phoneSession must be established");
     const id = "p-" + Math.random().toString(36).slice(2) + "-" + Date.now().toString(36);
@@ -333,7 +340,7 @@ async function main() {
     });
 
     phoneRelayClient.send({
-      v: 1,
+      v: 2,
       id,
       ts,
       from,
@@ -342,6 +349,17 @@ async function main() {
       payload: { ciphertext },
     });
     return id;
+  }
+
+  async function rehandshakeAfterFailure() {
+    const manager = new PhonePairingManager({ deviceId: phoneDeviceId, staticKeypair: phoneX25519, helloKeypair: phoneEd25519 });
+    const request = manager.beginPairing({ ...responder.pairingManager.getAdvertisement(), ref: "rehandshake" });
+    phoneRelayClient.send(request);
+    const grant = await waitForMessage((m) => m.kind === "pairing_grant");
+    phoneSession = manager.handleGrant(grant);
+    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    phoneE2EState = mobileNewE2EState();
   }
 
   // ==========================================
@@ -355,6 +373,8 @@ async function main() {
 
     const grantEnv = await waitForMessage((m) => m.kind === "pairing_grant");
     phoneSession = phonePairingManager.handleGrant(grantEnv);
+    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     const candidate = responder.pairingManager.getCandidatePairing();
     assert.ok(candidate, "Candidate pairing must be present on responder");
@@ -365,7 +385,6 @@ async function main() {
 
     const trustedRecord = await responder.confirmTrustedPhone(
       desktopCode,
-      bytesToBase64(phoneEd25519.publicKey),
     );
     assert.strictEqual(trustedRecord.phoneDeviceId, phoneDeviceId);
     assert.strictEqual(trustedRecord.phoneHelloPubkeyB64, bytesToBase64(phoneEd25519.publicKey));
@@ -390,10 +409,10 @@ async function main() {
       staticKeypair: phoneX25519,
       remoteStaticPublicKey: base64ToBytes(advert.desktopPublicKey),
     });
-    const msg1 = initiator.writeMessage1(new Uint8Array(0));
+    const msg1 = initiator.writeMessage1(pairingPayload("skip-ref-rehandshake",advert));
 
     const rehandshakeReq = {
-      v: 1,
+      v: 2,
       id: "re-req-case-2",
       ts: Date.now(),
       from: phoneDeviceId,
@@ -419,6 +438,8 @@ async function main() {
       decrypt: (ct) => initiator.decrypt(ct),
     };
 
+    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(newPhoneSession, phoneDeviceId));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     // Both sides reset E2E state
     phoneSession = newPhoneSession;
     phoneE2EState = mobileNewE2EState();
@@ -442,7 +463,7 @@ async function main() {
 
     const prevCryptoFailures = responder.cryptoFailureCount;
     phoneRelayClient.send({
-      v: 1,
+      v: 2,
       id: "old-session-frame-1",
       ts: Date.now(),
       from: phoneDeviceId,
@@ -458,9 +479,9 @@ async function main() {
       "Frame sealed under old session must be rejected with crypto failure",
     );
 
-    // Re-activate current session on responder and verify new frames flow
-    responder.pairingManager.setActiveSession(currentResponderSession);
-    responder.e2e.resetPeer(phoneDeviceId);
+    // Crypto failure destroys the old state; recovery must contribute fresh entropy.
+    assert.throws(() => currentResponderSession.encrypt(new Uint8Array()));
+    await rehandshakeAfterFailure();
 
     const promiseList = waitForDecrypted((k) => k === "session_list");
     sendPhoneEncrypted("session_list_request", {});
@@ -487,7 +508,7 @@ async function main() {
     );
 
     const sendEnv = {
-      v: 1,
+      v: 2,
       id: replayId,
       ts: Date.now(),
       from: phoneDeviceId,
@@ -527,7 +548,7 @@ async function main() {
     );
 
     phoneRelayClient.send({
-      v: 1,
+      v: 2,
       id: "old-seq-msg-2",
       ts: Date.now(),
       from: phoneDeviceId,
@@ -543,10 +564,9 @@ async function main() {
       "Frame with old sequence number must be rejected",
     );
 
-    // Reconnect session
-    responder.pairingManager.setActiveSession(sessionBeforeOldSeq);
-    responder.e2e.resetPeer(phoneDeviceId);
-    phoneE2EState = mobileNewE2EState();
+    // A failed session is terminal; reconnect with new keys.
+    assert.throws(() => sessionBeforeOldSeq.encrypt(new Uint8Array()));
+    await rehandshakeAfterFailure();
 
     console.log("CASE 3: PASS");
   } catch (err) {
@@ -714,7 +734,7 @@ async function main() {
     const waitCmd2 = waitForDecrypted((k, b) => k === "command_result" && b.idempotencyKey === key);
     sendPhoneEncrypted("command_request", {
       idempotencyKey: key,
-      instruction: "Do task again",
+      instruction: "Do task",
       sentAt: Date.now(),
     });
     const res2 = await waitCmd2;
@@ -798,6 +818,7 @@ async function main() {
     for (let i = 0; i < fileSize; i++) {
       fileBytes[i] = i % 256;
     }
+    fileBytes.set(new TextEncoder().encode("%PDF-1.7\n"));
     const fileSha256Bytes = sha256(fileBytes);
     let fileSha256Hex = "";
     for (const b of fileSha256Bytes) fileSha256Hex += b.toString(16).padStart(2, "0");
@@ -816,8 +837,8 @@ async function main() {
     await waitAccept1;
     console.log("file_offer accepted! Sending chunks...");
 
-    // Send 64 KB chunks (spaced to respect relay's 30 msg/sec rate limit)
-    const chunkSize = 64 * 1024;
+    // Send 32 KiB chunks (spaced to respect relay's 30 msg/sec rate limit)
+    const chunkSize = 32 * 1024;
     let seq = 0;
     for (let offset = 0; offset < fileSize; offset += chunkSize) {
       const slice = fileBytes.subarray(offset, Math.min(offset + chunkSize, fileSize));
@@ -964,10 +985,10 @@ async function main() {
       staticKeypair: phoneX25519,
       remoteStaticPublicKey: base64ToBytes(advert.desktopPublicKey),
     });
-    const msg1 = initiator.writeMessage1(new Uint8Array(0));
+    const msg1 = initiator.writeMessage1(pairingPayload("skip-ref",advert));
 
     const rehandshakeReq = {
-      v: 1,
+      v: 2,
       id: "recovery-rehandshake",
       ts: Date.now(),
       from: phoneDeviceId,
@@ -993,6 +1014,8 @@ async function main() {
       decrypt: (ct) => initiator.decrypt(ct),
     };
 
+    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     phoneE2EState = mobileNewE2EState();
 
     // 4. Re-request by key
@@ -1029,7 +1052,7 @@ async function main() {
 
     // Phone sends relay hello containing helloPubkey
     phoneRelayClient.send({
-      v: 1,
+      v: 2,
       id: "hello-capture-env-10",
       ts: Date.now(),
       from: phoneDeviceId,
@@ -1050,6 +1073,8 @@ async function main() {
 
     const grantEnv10 = await waitForMessage((m) => m.kind === "pairing_grant");
     phoneSession = phonePairingManager.handleGrant(grantEnv10);
+    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     phoneE2EState = mobileNewE2EState();
 
     const candidate10 = responder.pairingManager.getCandidatePairing();
@@ -1226,7 +1251,7 @@ async function main() {
 
     const malformedRes = await waitMalformed;
     assert.strictEqual(malformedRes.body.ok, false);
-    assert.strictEqual(malformedRes.body.summary, "Invalid request");
+    assert.strictEqual(malformedRes.body.summary, "Request rejected or outcome unknown; check desktop before retrying");
     assert.strictEqual(malformedRes.body.idempotencyKey, "");
 
     console.log("CASE 13: PASS");
@@ -1235,9 +1260,57 @@ async function main() {
     process.exit(1);
   }
 
-  // Teardown
-  console.log("\n=== ALL THIRTEEN INTEGRATION CASES PASSED ===");
+  // PQ integration uses the same real relay and mobile client, with the feature enabled.
+  console.log("\n--- CASE 14: PQ pairing, prekey lookup, idempotent retry and refresh over WebSocket ---");
   await responder.stop();
+  // Prior file-transfer cases deliberately saturate the relay's one-second rate window.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  phoneSession = null;
+  const pqResponder = new Responder({
+    identity: desktopIdentity, enginePort: fakeEngine, relayUrl, enablePqPairing: true,
+    hostControls: { setRemoteSessionActive: async () => {}, authorize: async () => true },
+    dataDir: path.join(tmpDir, "pq-responder-data"), wsImpl: WebSocket,
+  });
+  try {
+    await pqResponder.start();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const advert = pqResponder.pairingManager.getAdvertisement();
+    phoneRelayClient.send({ v: 2, id: "pq-prekey-lookup", ts: Date.now(), from: phoneDeviceId,
+      to: desktopIdentity.deviceId, kind: "pairing_prekey_request", payload: { ref: advert.ref, pqPrekeyId: advert.pqPrekeyId } });
+    const lookup = await waitForMessage((m) => m.kind === "pairing_prekey" && m.payload.requestId === "pq-prekey-lookup");
+    const manager = new PhonePairingManager({ deviceId: phoneDeviceId, staticKeypair: phoneX25519, helloKeypair: phoneEd25519 });
+    const request = manager.beginPairing(advert, lookup.payload.publicKey);
+    phoneRelayClient.send(request);
+    const lost = await waitForMessage((m) => m.kind === "pairing_grant");
+    // Simulate a lost M2 and retry the exact authenticated M1.
+    phoneRelayClient.send(request);
+    const retried = await waitForMessage((m) => m.kind === "pairing_grant");
+    assert.deepEqual(retried, lost);
+    phoneSession = manager.handleGrant(retried);
+    assert.equal(pqResponder.sendEncrypted("agent_status", { state: "idle" }), false);
+    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await pqResponder.confirmTrustedPhone(pqResponder.pairingManager.getCandidatePairing().verificationCode);
+    phoneE2EState = mobileNewE2EState();
+    const waitSessions = waitForDecrypted((k) => k === "session_list");
+    sendPhoneEncrypted("session_list_request", {});
+    await waitSessions;
+    const next = phoneSession.nextPqPrekey;
+    const freshManager = new PhonePairingManager({ deviceId: phoneDeviceId, staticKeypair: phoneX25519, helloKeypair: phoneEd25519 });
+    phoneRelayClient.send(freshManager.beginPairing(next.advertisement, next.publicKey));
+    const nextGrant = await waitForMessage((m) => m.kind === "pairing_grant");
+    phoneSession = freshManager.handleGrant(nextGrant);
+    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    phoneE2EState = mobileNewE2EState();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const afterRefresh = waitForDecrypted((k) => k === "session_list");
+    sendPhoneEncrypted("session_list_request", {});
+    await afterRefresh;
+    manager.destroy(); freshManager.destroy();
+    console.log("CASE 14: PASS");
+  } finally { await pqResponder.stop(); }
+  // Teardown
+  console.log("\n=== ALL FOURTEEN INTEGRATION CASES PASSED ===");
   phoneRelayClient.close();
   cleanup();
   process.exit(0);

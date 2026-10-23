@@ -8,10 +8,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@bimax/protocol": "*",
+    "@bimax/protocol": "0.1.0",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "@noble/ciphers": "^2.4.0",
+    "@bimax/core": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

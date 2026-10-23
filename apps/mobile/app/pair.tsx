@@ -13,26 +13,15 @@ import { useRouter } from "expo-router";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import type { PairingAdvertisement } from "@bimax/protocol";
 import { parseAdvertisement, saveTrustedDesktop } from "../lib/crypto";
-import {
-  formatVerificationCode,
-  type EstablishedSession,
-} from "../lib/session";
+import { formatVerificationCode, type EstablishedSession } from "../lib/session";
 import { useRelayContext } from "../lib/session/provider";
 
 type PairingStep =
-  | "idle"
-  | "scanning"
-  | "manual"
-  | "confirming"
-  | "pairing"
-  | "verifying"
-  | "done"
-  | "error";
+  "idle" | "scanning" | "manual" | "confirming" | "pairing" | "verifying" | "done" | "error";
 
 export default function PairScreen() {
   const router = useRouter();
-  const { pairWithDesktop, refreshTrustedDesktop, dropSession } =
-    useRelayContext();
+  const { pairWithDesktop, refreshTrustedDesktop, dropSession } = useRelayContext();
   const [step, setStep] = useState<PairingStep>("idle");
   const [advert, setAdvert] = useState<PairingAdvertisement | null>(null);
   const [manualText, setManualText] = useState("");
@@ -42,6 +31,16 @@ export default function PairScreen() {
 
   const [permission, requestPermission] = useCameraPermissions();
   const isScanningActiveRef = useRef(false);
+  const pairingPeerRef = useRef<string | null>(null);
+  const completedRef = useRef(false);
+  const dropRef = useRef(dropSession);
+  dropRef.current = dropSession;
+  useEffect(
+    () => () => {
+      if (!completedRef.current && pairingPeerRef.current) dropRef.current(pairingPeerRef.current);
+    },
+    [],
+  );
 
   // Request camera permissions if entering scanning step
   useEffect(() => {
@@ -59,9 +58,7 @@ export default function PairScreen() {
       setScanInlineError("");
       setStep("confirming");
     } catch (err) {
-      setScanInlineError(
-        err instanceof Error ? err.message : "Invalid QR code advertisement",
-      );
+      setScanInlineError(err instanceof Error ? err.message : "Invalid QR code advertisement");
     }
   };
 
@@ -72,16 +69,14 @@ export default function PairScreen() {
       setErrorMessage("");
       setStep("confirming");
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error
-          ? err.message
-          : "Invalid pairing advertisement JSON",
-      );
+      setErrorMessage(err instanceof Error ? err.message : "Invalid pairing advertisement JSON");
     }
   };
 
   const startPairingFlow = async () => {
     if (!advert) return;
+    pairingPeerRef.current = advert.desktopDeviceId;
+    completedRef.current = false;
     setStep("pairing");
     setErrorMessage("");
     try {
@@ -98,7 +93,11 @@ export default function PairScreen() {
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.header}>
         <TouchableOpacity
-          onPress={() => router.back()}
+          onPress={() => {
+            if (advert) dropSession(advert.desktopDeviceId);
+            pairingPeerRef.current = null;
+            router.back();
+          }}
           style={styles.backButton}
         >
           <Text style={styles.backButtonText}>Cancel</Text>
@@ -112,8 +111,8 @@ export default function PairScreen() {
           <View style={styles.stepContainer}>
             <Text style={styles.title}>Pair with Bimax Desktop</Text>
             <Text style={styles.description}>
-              Scan the QR code shown on your desktop screen to establish a
-              secure, end-to-end encrypted companion channel.
+              Scan the QR code shown on your desktop screen to establish a secure, end-to-end
+              encrypted companion channel.
             </Text>
 
             <TouchableOpacity
@@ -147,19 +146,11 @@ export default function PairScreen() {
                 <Text style={styles.description}>
                   Camera access is needed to scan the desktop pairing QR code.
                 </Text>
-                <TouchableOpacity
-                  style={styles.primaryButton}
-                  onPress={requestPermission}
-                >
+                <TouchableOpacity style={styles.primaryButton} onPress={requestPermission}>
                   <Text style={styles.primaryButtonText}>Grant Permission</Text>
                 </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.secondaryButton}
-                  onPress={() => setStep("manual")}
-                >
-                  <Text style={styles.secondaryButtonText}>
-                    Enter code manually instead
-                  </Text>
+                <TouchableOpacity style={styles.secondaryButton} onPress={() => setStep("manual")}>
+                  <Text style={styles.secondaryButtonText}>Enter code manually instead</Text>
                 </TouchableOpacity>
               </View>
             ) : (
@@ -174,9 +165,7 @@ export default function PairScreen() {
                 <View style={styles.overlay}>
                   <View style={styles.scanTarget} />
                   {scanInlineError ? (
-                    <Text style={styles.scanInlineError}>
-                      {scanInlineError}
-                    </Text>
+                    <Text style={styles.scanInlineError}>{scanInlineError}</Text>
                   ) : (
                     <Text style={styles.overlayText}>
                       Point your camera at the QR code on your desktop
@@ -189,9 +178,7 @@ export default function PairScreen() {
                       setStep("manual");
                     }}
                   >
-                    <Text style={styles.scanManualLinkText}>
-                      Enter code manually
-                    </Text>
+                    <Text style={styles.scanManualLinkText}>Enter code manually</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -216,13 +203,8 @@ export default function PairScreen() {
               autoCapitalize="none"
               autoCorrect={false}
             />
-            {errorMessage ? (
-              <Text style={styles.errorText}>{errorMessage}</Text>
-            ) : null}
-            <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={handleManualSubmit}
-            >
+            {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+            <TouchableOpacity style={styles.primaryButton} onPress={handleManualSubmit}>
               <Text style={styles.primaryButtonText}>Continue</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -244,16 +226,11 @@ export default function PairScreen() {
               <Text style={styles.cardLabel}>Desktop Device ID:</Text>
               <Text style={styles.cardValue}>{advert.desktopDeviceId}</Text>
 
-              <Text style={[styles.cardLabel, { marginTop: 12 }]}>
-                Relay URL:
-              </Text>
+              <Text style={[styles.cardLabel, { marginTop: 12 }]}>Relay URL:</Text>
               <Text style={styles.cardValue}>{advert.relayUrl}</Text>
             </View>
 
-            <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={startPairingFlow}
-            >
+            <TouchableOpacity style={styles.primaryButton} onPress={startPairingFlow}>
               <Text style={styles.primaryButtonText}>Pair with this device</Text>
             </TouchableOpacity>
 
@@ -273,9 +250,7 @@ export default function PairScreen() {
         {step === "pairing" && (
           <View style={styles.stepContainer}>
             <ActivityIndicator size="large" color="#2563eb" />
-            <Text style={[styles.title, { marginTop: 24 }]}>
-              Waiting for desktop approval…
-            </Text>
+            <Text style={[styles.title, { marginTop: 24 }]}>Waiting for desktop approval…</Text>
             <Text style={styles.description}>
               Please confirm the pairing request on your Bimax desktop app.
             </Text>
@@ -305,6 +280,8 @@ export default function PairScreen() {
                       staticPublicKeyB64: advert.desktopPublicKey,
                       relayUrl: advert.relayUrl,
                       lanRelayUrl: advert.lanRelayUrl,
+                      cryptoVersion: advert.cryptoVersion,
+                      nextPqPrekey: session.nextPqPrekey,
                     });
                   } catch (err) {
                     // Never report success without a saved record.
@@ -315,12 +292,18 @@ export default function PairScreen() {
                     return;
                   }
                   try {
-                    await refreshTrustedDesktop();
-                  } catch {
-                    // Ignore: the record is saved, so pairing succeeded. Worst
-                    // case the home card corrects itself on next launch.
+                    await refreshTrustedDesktop(session);
+                  } catch (error) {
+                    setErrorMessage(
+                      error instanceof Error
+                        ? error.message
+                        : "Trust was saved but the secure connection could not be activated. Reopen the app.",
+                    );
+                    setStep("error");
+                    return;
                   }
                 }
+                completedRef.current = true;
                 setStep("done");
                 router.back();
               }}
@@ -349,13 +332,8 @@ export default function PairScreen() {
         {step === "done" && (
           <View style={styles.stepContainer}>
             <Text style={styles.title}>Pairing Complete!</Text>
-            <Text style={styles.description}>
-              Your device is paired and end-to-end encrypted.
-            </Text>
-            <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={() => router.back()}
-            >
+            <Text style={styles.description}>Your device is paired and end-to-end encrypted.</Text>
+            <TouchableOpacity style={styles.primaryButton} onPress={() => router.back()}>
               <Text style={styles.primaryButtonText}>Done</Text>
             </TouchableOpacity>
           </View>
@@ -363,9 +341,7 @@ export default function PairScreen() {
 
         {step === "error" && (
           <View style={styles.stepContainer}>
-            <Text style={[styles.title, { color: "#dc2626" }]}>
-              Pairing Error
-            </Text>
+            <Text style={[styles.title, { color: "#dc2626" }]}>Pairing Error</Text>
             <Text style={styles.description}>{errorMessage}</Text>
             <TouchableOpacity
               style={styles.primaryButton}
