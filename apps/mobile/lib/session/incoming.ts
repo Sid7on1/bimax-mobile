@@ -4,6 +4,7 @@ import type {
   ToolApprovalRequest,
   AgentStatus,
   AgentSessionInfo,
+  MacWorkspace,
   SessionList,
   CommandResult,
   KillResult,
@@ -40,6 +41,15 @@ export function parseAgentStatusPayload(payload: unknown): AgentStatus | null {
   };
 }
 
+export function parseWorkspace(value: unknown): MacWorkspace | null {
+  const item = value as MacWorkspace;
+  return item &&
+    /^w-[a-f0-9]{64}$/.test(item.id) &&
+    typeof item.name === "string" &&
+    typeof item.location === "string"
+    ? { id: item.id, name: item.name.slice(0, 80), location: item.location.slice(0, 160) }
+    : null;
+}
 export function parseSessionListPayload(payload: unknown): AgentSessionInfo[] | null {
   const listPayload = payload as SessionList | null | undefined;
   if (!listPayload || !Array.isArray(listPayload.sessions)) {
@@ -62,6 +72,7 @@ export function parseSessionListPayload(payload: unknown): AgentSessionInfo[] | 
         sessionId: item.sessionId.slice(0, 100),
         title: item.title.slice(0, 200),
         status: item.status,
+        workspace: parseWorkspace(item.workspace) ?? undefined,
         startedAt:
           typeof item.startedAt === "number" && Number.isFinite(item.startedAt)
             ? item.startedAt
@@ -217,6 +228,12 @@ export interface IncomingEnvelopeContext {
   onApprovalRequest?: (req: ToolApprovalRequest) => void;
   onApprovalResult?: (approvalId: string, accepted: boolean) => void;
   onAgentStatus?: (status: AgentStatus) => void;
+  onCloudSetup?: (payload: unknown) => void;
+  onSessionUpdate?: (payload: unknown) => void;
+  onWatchStatus?: (payload: unknown) => void;
+  onHistoryChunk?: (payload: unknown) => void;
+  onSessionCreated?: (value: unknown) => void;
+  onWorkspaces?: (workspaces: MacWorkspace[], supported: boolean) => void;
   onSessionList?: (sessions: AgentSessionInfo[]) => void;
   onCommandResult?: (res: {
     idempotencyKey: string;
@@ -287,7 +304,37 @@ export function dispatchIncomingEnvelope(
       if (status) ctx.onAgentStatus?.(status);
       break;
     }
+    case "cloud_setup": {
+      ctx.onCloudSetup?.(env.payload);
+      break;
+    }
+    case "session_update": {
+      ctx.onSessionUpdate?.(env.payload);
+      break;
+    }
+    case "session_watch_status": {
+      ctx.onWatchStatus?.(env.payload);
+      break;
+    }
+    case "session_history_chunk": {
+      ctx.onHistoryChunk?.(env.payload);
+      break;
+    }
+    case "session_create_result": {
+      ctx.onSessionCreated?.(env.payload);
+      return;
+    }
     case "session_list": {
+      const list = env.payload as SessionList;
+      if (list && typeof list.canCreateSessions === "boolean") {
+        const workspaces = Array.isArray(list.workspaces)
+          ? list.workspaces
+              .slice(0, 16)
+              .map(parseWorkspace)
+              .filter((item): item is MacWorkspace => !!item)
+          : [];
+        ctx.onWorkspaces?.(workspaces, list.canCreateSessions);
+      }
       const sessions = parseSessionListPayload(env.payload);
       if (sessions) ctx.onSessionList?.(sessions);
       break;

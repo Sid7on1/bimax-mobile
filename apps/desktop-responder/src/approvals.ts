@@ -69,9 +69,16 @@ export class ApprovalsGate {
    * Stores the exact object to guarantee byte-for-byte fidelity when hashing.
    */
   public registerRequest(req: ToolApprovalRequest): ToolApprovalRequest {
-    const storedObject = { ...req };
+    const storedObject = Object.freeze(structuredClone(req));
+    const existing = this.pending.get(req.approvalId);
+    if (existing) {
+      if (canonicalJson(existing.storedObject) !== canonicalJson(storedObject))
+        throw new Error("Approval capability already belongs to a different request");
+      return existing.storedObject;
+    }
+    if (this.completed.has(req.approvalId)) throw new Error("Approval capability was already consumed");
     this.pending.set(req.approvalId, {
-      request: req,
+      request: storedObject,
       storedObject,
       expiresAt: req.expiresAt,
       consumed: false,

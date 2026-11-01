@@ -9,6 +9,7 @@ export interface ChatHandlerOptions {
   sendToken: (token: ChatToken) => void;
   sendDone: (done: ChatDone) => void;
   maxBufferBytes?: number;
+  shouldStreamTokens?: (msg: ChatMessage) => boolean;
   authorize: (msg: ChatMessage, peer: string) => Promise<void>;
 }
 
@@ -21,10 +22,12 @@ export class ChatHandler {
   private sendToken: (token: ChatToken) => void;
   private sendDone: (done: ChatDone) => void;
   private maxBufferBytes: number;
+  private shouldStreamTokens?: ChatHandlerOptions["shouldStreamTokens"];
   private authorize: ChatHandlerOptions["authorize"];
 
   constructor(opts: ChatHandlerOptions) {
     this.authorize = opts.authorize;
+    this.shouldStreamTokens=opts.shouldStreamTokens;
     this.enginePort = opts.enginePort;
     this.idempotency = opts.idempotency;
     this.sendToken = opts.sendToken;
@@ -61,6 +64,7 @@ export class ChatHandler {
         msg.idempotencyKey,
         async () => {
           await this.authorize(msg, peer);
+          const streamTokens=this.shouldStreamTokens?.(msg)!==false;
           let seq = 0;
           let bufferedBytes = 0;
 
@@ -78,8 +82,9 @@ export class ChatHandler {
             this.sendToken({ idempotencyKey: msg.idempotencyKey, seq: seq++, token });
           };
           // Coalesce provider tokens so streaming and its ACKs fit relay rate limits.
-          const timer = setInterval(flush, 100);
+          const timer = streamTokens ? setInterval(flush, 100) : undefined;
           const onToken = (token: string) => {
+            if(!streamTokens)return;
             const size = new TextEncoder().encode(token).length;
             if (bufferedBytes + size > this.maxBufferBytes) {
               truncated = true;

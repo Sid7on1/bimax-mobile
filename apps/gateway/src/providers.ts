@@ -177,8 +177,7 @@ export async function fetchUpstream(
 ): Promise<Response> {
   if (
     env.MOCK_UPSTREAM === "1" ||
-    (typeof process !== "undefined" &&
-      (process.env as Record<string, string | undefined>)?.MOCK_UPSTREAM === "1")
+    (globalThis as {process?:{env?:Record<string,string|undefined>}}).process?.env?.MOCK_UPSTREAM === "1"
   ) {
     return createMockUpstreamResponse(req);
   }

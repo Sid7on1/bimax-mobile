@@ -1,4 +1,6 @@
 import type {
+  RemoteConversation,
+  MacWorkspace,
   AgentStatus,
   AgentSessionInfo,
   CommandResult,
@@ -13,6 +15,13 @@ export interface EnginePort {
   getStatus(): Promise<AgentStatus>;
   /** Sessions the phone may display/switch between. */
   listSessions(): Promise<AgentSessionInfo[]>;
+  /** Known Mac-owned folders only. Creating an empty chat neither selects nor starts an engine. */
+  listWorkspaces?(): Promise<MacWorkspace[]>;
+  createSession?(workspaceId: string): Promise<{sessionId:string}>;
+  /** Read only: must not select, start, resume or mutate an engine. */
+  getSessionHistory?(sessionId: string): Promise<RemoteConversation>;
+  /** Any selected conversation changed, including work begun locally on the Mac. */
+  onSessionChanged?(cb: (sessionId: string) => void): () => void;
   /** Fire-and-forget instruction; idempotent via idempotencyKey (§8). */
   sendInstruction(input: { idempotencyKey: string; instruction: string }): Promise<CommandResult>;
   /** Conversational turn; streams tokens via onToken (§9). */

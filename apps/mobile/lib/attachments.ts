@@ -81,7 +81,7 @@ export async function ingestFile(file: AttachedFile): Promise<AttachedFile> {
   let bytes: Uint8Array | undefined;
   try {
     // Never trust picker metadata or read the entire file. One extra byte detects overflow.
-    bytes = handle.readBytes(MAX_INLINE_SIZE + 1);
+    bytes = await handle.readBytes(MAX_INLINE_SIZE + 1);
     if (bytes.length >= MAX_INLINE_SIZE) throw new Error("Text file exceeds 200 KB");
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     return { ...file, size: bytes.length, uri: "", inlinedContent: text };
@@ -96,7 +96,7 @@ export async function ingestImageFile(file: AttachedFile): Promise<AttachedFile>
   const handle = new File(file.uri).open(FileMode.ReadOnly);
   let bytes: Uint8Array | undefined;
   try {
-    bytes = handle.readBytes(MAX_IMAGE_SIZE + 1);
+    bytes = await handle.readBytes(MAX_IMAGE_SIZE + 1);
     if (bytes.length === 0) throw new Error("Selected image is empty");
     if (bytes.length > MAX_IMAGE_SIZE) throw new Error("Image file exceeds 10 MB limit");
     const detectedMime = detectImageMime(bytes);

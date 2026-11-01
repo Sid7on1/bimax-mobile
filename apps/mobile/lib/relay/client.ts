@@ -222,7 +222,7 @@ export class RelayClient {
         }
 
         const messageId = env.id;
-        void Promise.resolve(this.opts.onMessage(env as unknown as Envelope<MessageKind, unknown>))
+        void Promise.resolve().then(() => this.opts.onMessage(env as unknown as Envelope<MessageKind, unknown>))
           .then(() => {
             if (env.kind !== "delivery_ack") {
               const ackEnv: Envelope<"delivery_ack", DeliveryAck> = {

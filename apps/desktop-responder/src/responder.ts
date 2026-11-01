@@ -1,3 +1,5 @@
+import { LiveConversations } from "./live";
+import { HistoryService } from "./history";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
@@ -19,9 +21,10 @@ import type {
   ToolApprovalRequest,
   AgentStatus,
   SessionList,
+  CloudRelayGrant,
 } from "@bimax/protocol";
 import type { EnginePort } from "./engine-port";
-import { canonicalJson } from "./crypto/keys";
+import { canonicalJson, ed25519Sign, sha256Bytes } from "./crypto/keys";
 import { generateDeviceId, type Identity } from "./identity";
 import { RelayClient, type WsConstructor } from "./relay-client";
 import { PairingManager, type TrustedPhoneRecord } from "./pairing";
@@ -29,6 +32,7 @@ import { E2ERegistry } from "./e2e";
 import { ApprovalsGate, type SecurityEvent } from "./approvals";
 import { IdempotencyLog } from "./idempotency";
 import { FilePipeline } from "./files";
+import { SessionCreation } from "./session-create";
 import { ChatHandler } from "./chat";
 import type { HostControls, RemoteOperation } from "./host-controls";
 
@@ -37,6 +41,7 @@ export interface ResponderOptions {
   enginePort: EnginePort;
   relayUrl: string;
   lanRelayUrl?: string;
+  onCloudGrant?: (grant: CloudRelayGrant) => Promise<void>;
   authorizeRelayUrl?: (url: string) => Promise<string>;
   dataDir?: string;
   wsImpl?: WsConstructor;
@@ -54,6 +59,7 @@ export class Responder {
   public idempotency: IdempotencyLog;
   public filePipeline: FilePipeline;
   public chatHandler: ChatHandler;
+  private sessionCreation: SessionCreation;
 
   public unknownInnerKindCount = 0;
   public cryptoFailureCount = 0;
@@ -62,10 +68,24 @@ export class Responder {
   private securityLogPath: string;
   private hostControls: HostControls;
   private remoteEpoch = new AbortController();
+  public readonly history: HistoryService;
+  public readonly live: LiveConversations;
+  private unwatchEngine?: () => void;
+  private lastStatusPush = "";
+  private lastListPush = "";
+  private statusPushEpoch = 0;
+  private cloudClient?: RelayClient;
+  private cloudRelayUrl?:string;
+  private activeRoute?: RelayClient;
+  private onlinePeers = new Map<RelayClient,Set<string>>();
+  private onCloudGrant?: ResponderOptions['onCloudGrant'];
+  private cloudSetupSession?: object;
+
 
   constructor(opts: ResponderOptions) {
     if (!opts.hostControls) throw new Error("Desktop host controls are required");
     this.hostControls = opts.hostControls;
+    this.onCloudGrant=opts.onCloudGrant;
     this.identity = opts.identity;
     this.enginePort = opts.enginePort;
     this.dataDir = opts.dataDir ?? path.join(process.cwd(), ".responder-data");
@@ -106,10 +126,20 @@ export class Responder {
       },
     });
 
+    this.sessionCreation = new SessionCreation({
+      context: () => {
+        const peer=this.pairingManager.getTrustedPhone()?.phoneDeviceId, session=this.pairingManager.getActiveSession();
+        return peer && session && !this.remoteEpoch.signal.aborted ? {peer,session} : null;
+      },
+      authorize: () => this.authorizeRemote({kind:"chat",peer:this.pairingManager.getTrustedPhone()?.phoneDeviceId??"",text:"Create a new conversation in the selected folder"}),
+      create: async id => {if(!this.enginePort.createSession)throw Error("Update Bimax on your Mac");return this.enginePort.createSession(id);},
+      journal: this.idempotency,
+    });
     this.chatHandler = new ChatHandler({
       enginePort: this.enginePort,
       idempotency: this.idempotency,
       authorize: (msg, peer) => this.authorizeRemote({ kind: "chat", peer, text: msg.text }),
+      shouldStreamTokens: msg => !msg.sessionId || !this.live?.isWatching(msg.sessionId),
       sendToken: (token: ChatToken) => {
         this.sendEncrypted("chat_token", token);
       },
@@ -124,6 +154,33 @@ export class Responder {
       wsImpl: opts.wsImpl,
       authorizeUrl: opts.authorizeRelayUrl,
       onMessage: (env) => this.handleRelayMessage(env),
+      onStatus: status => { if (status !== 'online' && (!this.activeRoute || this.activeRoute===this.relayClient)) { this.live?.clear(); this.history?.clear(); void this.hostControls.setRemoteSessionActive(false).catch(() => {}); } },
+    });
+
+    this.live = new LiveConversations({
+      context: () => {
+        const peer = this.pairingManager.getTrustedPhone()?.phoneDeviceId;
+        const session = this.pairingManager.getActiveSession();
+        return peer && session && (this.activeRoute??this.relayClient).status === 'online' && !this.remoteEpoch.signal.aborted ? {peer,session} : null;
+      },
+      authorize: async (id) => this.authorizeRemote({kind:'history',peer:this.pairingManager.getTrustedPhone()?.phoneDeviceId ?? '',text:`Follow conversation ${id}`}),
+      read: async id => { if(!this.enginePort.getSessionHistory)throw Error('Live history unsupported');return this.enginePort.getSessionHistory(id); },
+      send: update => this.sendEncrypted('session_update',update),
+    });
+    this.unwatchEngine = this.enginePort.onSessionChanged?.(id => this.live.changed(id));
+    this.history = new HistoryService({
+      context: () => {
+        const peer = this.pairingManager.getTrustedPhone()?.phoneDeviceId;
+        const session = this.pairingManager.getActiveSession();
+        return peer && session && !this.remoteEpoch.signal.aborted ? { peer, session } : null;
+      },
+      title: async id => (await this.enginePort.listSessions()).find(item => item.sessionId === id)?.title ?? null,
+      authorize: async (_id, title) => this.authorizeRemote({ kind: "history", peer: this.pairingManager.getTrustedPhone()?.phoneDeviceId ?? "", text: `Read this conversation on your phone: ${title.slice(0, 200)}` }),
+      capture: (watchId, snapshot, context) => this.live.capture(watchId, snapshot, context),
+      read: async id => {
+        if (!this.enginePort.getSessionHistory) throw new Error("History unsupported");
+        return this.enginePort.getSessionHistory(id);
+      },
     });
 
     // Proactive engine listeners
@@ -133,7 +190,10 @@ export class Responder {
     });
 
     this.enginePort.onStatusChanged((status: AgentStatus) => {
-      this.sendEncrypted("agent_status", status);
+      const key=JSON.stringify([status.state,status.sessionId,status.taskSummary]);
+      if(key!==this.lastStatusPush){this.lastStatusPush=key;this.sendEncrypted('agent_status',status);}
+      const epoch=++this.statusPushEpoch;
+      void this.enginePort.listSessions().then(sessions=>{if(epoch!==this.statusPushEpoch)return;const key=JSON.stringify(sessions);if(key!==this.lastListPush){this.lastListPush=key;this.sendEncrypted('session_list',{sessions});}}).catch(()=>{});
     });
   }
 
@@ -149,10 +209,29 @@ export class Responder {
     this.relayClient.connect();
   }
 
+  public get cloudStatus(): string {return this.cloudClient?.status??'offline';}
+  public get phoneConnected(): boolean {
+    const peer=this.pairingManager.getTrustedPhone()?.phoneDeviceId,route=this.activeRoute??this.relayClient;
+    return !!peer&&!!this.pairingManager.getActiveSession()&&route.status==='online'&&!!this.onlinePeers.get(route)?.has(peer);
+  }
+  public connectCloud(relayUrl:string,authorizeUrl:(url:string)=>Promise<string>):void{
+    if(this.cloudClient && this.cloudRelayUrl===relayUrl)return;
+    this.cloudClient?.close();
+    this.cloudRelayUrl=relayUrl;
+    const cloud:RelayClient=new RelayClient({relayUrl,identity:this.identity,authorizeUrl,onMessage:env=>this.handleRelayMessage(env,cloud),onStatus:status=>{
+      if(status!=='online'){this.onlinePeers.delete(cloud);if(this.activeRoute===cloud){this.live.clear();this.history.clear();void this.hostControls.setRemoteSessionActive(false).catch(()=>{});}}
+    }});this.cloudClient=cloud;cloud.connect();
+  }
+
   public async stop(): Promise<void> {
+    this.unwatchEngine?.();
     this.cancelRemoteResources();
     await this.hostControls.setRemoteSessionActive(false).catch(() => {});
     this.relayClient.close();
+    this.cloudClient?.close();
+    this.cloudClient=undefined;
+    this.activeRoute=undefined;
+    this.onlinePeers.clear();
     this.pairingManager.destroy();
     this.approvalsGate.destroy();
     await this.idempotency.persistNow();
@@ -221,7 +300,7 @@ export class Responder {
         kind: "encrypted",
         payload: { ciphertext },
       };
-      this.relayClient.send(env);
+      (this.activeRoute??this.relayClient).send(env);
       return true;
     } catch {
       return false;
@@ -231,15 +310,22 @@ export class Responder {
   /**
    * Main incoming envelope dispatcher.
    */
-  private async handleRelayMessage(env: Envelope<MessageKind, unknown>): Promise<void> {
+  private async handleRelayMessage(env: Envelope<MessageKind, unknown>, route=this.relayClient): Promise<void> {
     if (!env || typeof env !== "object" || env.v !== 2 || env.to !== this.identity.deviceId) return;
 
+    if(env.kind==='presence' && env.from==='relay'){
+      const p=env.payload as {deviceId?:string;status?:string};
+      if(typeof p?.deviceId==='string' && ['online','offline'].includes(p.status??'')){
+        const peers=this.onlinePeers.get(route)??new Set<string>();if(p.status==='online')peers.add(p.deviceId);else peers.delete(p.deviceId);this.onlinePeers.set(route,peers);
+      }
+      return;
+    }
     if (env.kind === "pairing_prekey_request") {
       const request = env.payload as { ref?: string; pqPrekeyId?: string } | null;
       if (typeof request?.ref !== "string" || typeof request.pqPrekeyId !== "string") return;
       const prekey = this.pairingManager.getPublicPrekey(request.pqPrekeyId, request.ref);
       if (prekey)
-        this.relayClient.send({
+        route.send({
           v: 2,
           id: "prekey-" + generateDeviceId(),
           ts: Date.now(),
@@ -256,7 +342,8 @@ export class Responder {
         env as Envelope<"pairing_request", PairingRequest>,
       );
       if (res) {
-        this.relayClient.send(res.grantEnv);
+        this.live.clear();this.history.clear();
+        route.send(res.grantEnv);
       }
       return;
     }
@@ -266,10 +353,10 @@ export class Responder {
         env as Envelope<"encrypted", EncryptedPayload>,
       );
       if (confirmation !== "unrelated") {
-        if (confirmation === "confirmed") this.e2e.resetPeer(env.from);
+        if (confirmation === "confirmed") { this.e2e.resetPeer(env.from);this.activeRoute=route; }
         return;
       }
-      await this.handleEncryptedMessage(env as Envelope<"encrypted", EncryptedPayload>);
+      await this.handleEncryptedMessage(env as Envelope<"encrypted", EncryptedPayload>,route);
       return;
     }
 
@@ -281,6 +368,7 @@ export class Responder {
    */
   private async handleEncryptedMessage(
     env: Envelope<"encrypted", EncryptedPayload>,
+    route=this.relayClient,
   ): Promise<void> {
     const trusted = this.pairingManager.getTrustedPhone();
     const session = this.pairingManager.getActiveSession();
@@ -338,7 +426,17 @@ export class Responder {
       return;
     }
 
+    this.activeRoute=route;
     await this.dispatchInnerFrame(openResult.innerKind, openResult.body, env);
+  }
+
+  private offerCloudRegistration(force=false):void {
+    if(!this.onCloudGrant || !this.pairingManager.getActiveSession())return;
+    if(!force && this.cloudSetupSession===this.pairingManager.getActiveSession())return;
+    this.cloudSetupSession=this.pairingManager.getActiveSession()??undefined;
+            const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);
+            const proof={action:'register',at:Date.now(),deviceId:this.identity.deviceId,helloPubkey:this.identity.helloPubkeyB64,nonce:Buffer.from(bytes).toString('hex'),roomId:Buffer.from(sha256Bytes(new TextEncoder().encode(this.identity.helloPubkeyB64))).toString('hex')};
+            this.sendEncrypted('cloud_setup',{...proof,signature:Buffer.from(ed25519Sign(this.identity.helloKeypair.privateKey,new TextEncoder().encode(canonicalJson(proof)))).toString('base64')});
   }
 
   /**
@@ -350,6 +448,15 @@ export class Responder {
     outer: Envelope<"encrypted", EncryptedPayload>,
   ): Promise<void> {
     switch (innerKind) {
+      case 'cloud_setup': {
+        if(!this.onCloudGrant)return;
+        if((body as {action?:string})?.action==='request'){this.offerCloudRegistration(true);break;}
+        const grant=body as CloudRelayGrant;
+        if(!grant||grant.action!=='grant'||grant.deviceId!==this.identity.deviceId)return;
+        try{await this.onCloudGrant(grant);this.sendEncrypted('cloud_setup',{action:'ready',relayUrl:grant.relayUrl});}
+        catch{this.sendEncrypted('cloud_setup',{action:'error',message:'Outside-network connection could not be enabled. Try reconnecting.'});}
+        break;
+      }
       case "command_request": {
         const req = body as CommandRequest;
         if (
@@ -453,11 +560,27 @@ export class Responder {
         break;
       }
 
+      case "session_watch": {
+        try { const result=await this.live.request(body,outer.from);if(result)this.sendEncrypted('session_watch_status',result); }
+        catch { const r=body as {watchId?:string;sessionId?:string};if(r?.watchId&&r?.sessionId)this.sendEncrypted('session_watch_status',{watchId:r.watchId,sessionId:r.sessionId,ok:false,error:'Live connection unavailable'}); }
+        break;
+      }
+      case "session_history_request": {
+        const result = await this.history.handle(body, outer.from);
+        if (result) this.sendEncrypted("session_history_chunk", result);
+        break;
+      }
+      case "session_create_request": {
+        const result = await this.sessionCreation.handle(body, outer.from);
+        if(result)this.sendEncrypted("session_create_result",result);
+        break;
+      }
       case "session_list_request": {
         try {
           const sessions = await this.enginePort.listSessions();
-          const list: SessionList = { sessions };
+          const list: SessionList = { sessions, workspaces: await this.enginePort.listWorkspaces?.(), canCreateSessions: !!this.enginePort.createSession };
           this.sendEncrypted("session_list", list);
+          this.offerCloudRegistration();
           for (const request of this.approvalsGate.getPendingRequests().slice(0, 8))
             this.sendEncrypted("approval_request", request);
         } catch {
@@ -521,6 +644,8 @@ export class Responder {
   }
 
   private cancelRemoteResources(): void {
+    this.live.clear();
+    this.history.clear();
     this.remoteEpoch.abort();
     this.remoteEpoch = new AbortController();
     this.approvalsGate.cancelForSession();
@@ -561,7 +686,7 @@ export class Responder {
       signal.aborted ||
       operation.peer !== this.pairingManager.getTrustedPhone()?.phoneDeviceId
     )
-      throw new Error("Remote action was not authorized on the desktop");
+      throw new Error("Paired-phone access is no longer authorized");
     // Instruction audit must succeed before dispatch. No raw instruction appears in mobile errors.
     await fs.appendFile(
       this.securityLogPath,

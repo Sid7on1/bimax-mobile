@@ -21,3 +21,7 @@ packages/core/relay/
 
 # D1 exports may contain private account and billing data.
 artifacts/private-release/
+
+# Generated from the linked Desktop renderer; regenerated before start/check.
+apps/mobile/generated/
+.bimax-desktop-link.json

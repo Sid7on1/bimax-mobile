@@ -1,9 +1,12 @@
 const base = require("./app.json").expo;
 
-module.exports = () => {
+module.exports = ({ config: input = base } = {}) => {
   const redirect = process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL;
-  const config = structuredClone(base);
-  config.android.allowBackup = false;
+  const config = {
+    ...input,
+    android: { ...input.android, allowBackup: false },
+    ios: { ...input.ios },
+  };
   if (redirect) {
     const url = new URL(redirect);
     if (

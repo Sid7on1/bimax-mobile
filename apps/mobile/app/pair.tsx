@@ -1,3 +1,5 @@
+import { pairingProgress } from "../lib/session/pairing-progress";
+import { colors } from "../lib/theme";
 import { useState, useEffect, useRef } from "react";
 import {
   StyleSheet,
@@ -21,7 +23,8 @@ type PairingStep =
 
 export default function PairScreen() {
   const router = useRouter();
-  const { pairWithDesktop, refreshTrustedDesktop, dropSession } = useRelayContext();
+  const { pairWithDesktop, refreshTrustedDesktop, dropSession, status } = useRelayContext();
+  const progress = pairingProgress(status);
   const [step, setStep] = useState<PairingStep>("idle");
   const [advert, setAdvert] = useState<PairingAdvertisement | null>(null);
   const [manualText, setManualText] = useState("");
@@ -109,12 +112,15 @@ export default function PairScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         {step === "idle" && (
           <View style={styles.stepContainer}>
-            <Text style={styles.title}>Pair with Bimax Desktop</Text>
+            <Text style={styles.title}>Connect your Mac</Text>
             <Text style={styles.description}>
-              Scan the QR code shown on your desktop screen to establish a secure, end-to-end
-              encrypted companion channel.
+              On your Mac, open Bimax Settings → Phone connection and enable pairing.
             </Text>
 
+            <Text style={styles.description}>
+              Keep both devices on the same Wi-Fi. Scan the QR code, then confirm the matching code
+              on both screens.
+            </Text>
             <TouchableOpacity
               style={styles.primaryButton}
               onPress={() => {
@@ -133,7 +139,7 @@ export default function PairScreen() {
                 setStep("manual");
               }}
             >
-              <Text style={styles.secondaryButtonText}>Enter code manually</Text>
+              <Text style={styles.secondaryButtonText}>Paste pairing details</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -178,7 +184,7 @@ export default function PairScreen() {
                       setStep("manual");
                     }}
                   >
-                    <Text style={styles.scanManualLinkText}>Enter code manually</Text>
+                    <Text style={styles.scanManualLinkText}>Paste pairing details</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -193,6 +199,7 @@ export default function PairScreen() {
               Paste the pairing advertisement data from your desktop:
             </Text>
             <TextInput
+              keyboardAppearance="dark"
               style={styles.textArea}
               multiline
               numberOfLines={6}
@@ -249,11 +256,9 @@ export default function PairScreen() {
 
         {step === "pairing" && (
           <View style={styles.stepContainer}>
-            <ActivityIndicator size="large" color="#2563eb" />
-            <Text style={[styles.title, { marginTop: 24 }]}>Waiting for desktop approval…</Text>
-            <Text style={styles.description}>
-              Please confirm the pairing request on your Bimax desktop app.
-            </Text>
+            <ActivityIndicator size="large" color={colors.text} />
+            <Text style={[styles.title, { marginTop: 24 }]}>{progress.title}</Text>
+            <Text style={styles.description}>{progress.description}</Text>
           </View>
         )}
 
@@ -341,7 +346,7 @@ export default function PairScreen() {
 
         {step === "error" && (
           <View style={styles.stepContainer}>
-            <Text style={[styles.title, { color: "#dc2626" }]}>Pairing Error</Text>
+            <Text style={[styles.title, { color: colors.danger }]}>Pairing Error</Text>
             <Text style={styles.description}>{errorMessage}</Text>
             <TouchableOpacity
               style={styles.primaryButton}
@@ -362,7 +367,7 @@ export default function PairScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#ffffff",
+    backgroundColor: colors.background,
   },
   header: {
     flexDirection: "row",
@@ -371,7 +376,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#e5e7eb",
+    borderBottomColor: colors.border,
   },
   backButton: {
     paddingVertical: 6,
@@ -379,12 +384,12 @@ const styles = StyleSheet.create({
   },
   backButtonText: {
     fontSize: 16,
-    color: "#2563eb",
+    color: colors.text,
   },
   headerTitle: {
     fontSize: 17,
     fontWeight: "600",
-    color: "#111827",
+    color: colors.text,
   },
   headerSpacer: {
     width: 60,
@@ -401,92 +406,92 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 22,
     fontWeight: "700",
-    color: "#111827",
+    color: colors.text,
     textAlign: "center",
     marginBottom: 8,
   },
   description: {
     fontSize: 15,
-    color: "#4b5563",
+    color: colors.secondary,
     textAlign: "center",
     marginBottom: 24,
     lineHeight: 22,
   },
   primaryButton: {
-    backgroundColor: "#111827",
+    backgroundColor: colors.button,
     width: "100%",
     paddingVertical: 14,
-    borderRadius: 8,
+    borderRadius: 18,
     alignItems: "center",
     marginBottom: 12,
   },
   primaryButtonText: {
-    color: "#ffffff",
+    color: colors.buttonText,
     fontSize: 16,
     fontWeight: "600",
   },
   secondaryButton: {
-    backgroundColor: "#f3f4f6",
+    backgroundColor: colors.surface,
     width: "100%",
     paddingVertical: 14,
-    borderRadius: 8,
+    borderRadius: 18,
     alignItems: "center",
     marginBottom: 12,
   },
   secondaryButtonText: {
-    color: "#111827",
+    color: colors.text,
     fontSize: 16,
     fontWeight: "600",
   },
   dangerButton: {
-    backgroundColor: "#fef2f2",
+    backgroundColor: colors.dangerSurface,
     width: "100%",
     paddingVertical: 14,
-    borderRadius: 8,
+    borderRadius: 18,
     alignItems: "center",
     borderWidth: 1,
     borderColor: "#fca5a5",
   },
   dangerButtonText: {
-    color: "#dc2626",
+    color: colors.danger,
     fontSize: 16,
     fontWeight: "600",
   },
   card: {
-    backgroundColor: "#f9fafb",
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: "#e5e7eb",
-    borderRadius: 8,
+    borderColor: colors.border,
+    borderRadius: 18,
     padding: 16,
     width: "100%",
     marginBottom: 24,
   },
   cardLabel: {
     fontSize: 13,
-    color: "#6b7280",
+    color: colors.secondary,
     fontWeight: "500",
   },
   cardValue: {
     fontSize: 15,
-    color: "#111827",
+    color: colors.text,
     fontWeight: "600",
     marginTop: 2,
   },
   textArea: {
     width: "100%",
-    backgroundColor: "#f9fafb",
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: "#d1d5db",
-    borderRadius: 8,
+    borderColor: colors.border,
+    borderRadius: 18,
     padding: 12,
     fontSize: 14,
-    color: "#111827",
+    color: colors.text,
     marginBottom: 16,
     minHeight: 120,
     textAlignVertical: "top",
   },
   errorText: {
-    color: "#dc2626",
+    color: colors.danger,
     fontSize: 14,
     marginBottom: 16,
     textAlign: "center",
@@ -513,13 +518,13 @@ const styles = StyleSheet.create({
     width: 220,
     height: 220,
     borderWidth: 2,
-    borderColor: "#ffffff",
+    borderColor: colors.text,
     borderRadius: 16,
     backgroundColor: "transparent",
     marginBottom: 24,
   },
   overlayText: {
-    color: "#ffffff",
+    color: colors.text,
     fontSize: 14,
     textAlign: "center",
     marginBottom: 16,
@@ -539,24 +544,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   scanManualLinkText: {
-    color: "#60a5fa",
+    color: colors.secondary,
     fontSize: 15,
     fontWeight: "500",
   },
   codeContainer: {
-    backgroundColor: "#f3f4f6",
+    backgroundColor: colors.surface,
     paddingVertical: 18,
     paddingHorizontal: 24,
     borderRadius: 10,
     marginBottom: 24,
     borderWidth: 1,
-    borderColor: "#e5e7eb",
+    borderColor: colors.border,
   },
   verificationCode: {
     fontSize: 22,
     fontWeight: "700",
     letterSpacing: 2,
-    color: "#111827",
+    color: colors.text,
     fontFamily: "monospace",
   },
 });

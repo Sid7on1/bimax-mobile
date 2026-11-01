@@ -1,6 +1,8 @@
+import { colors } from "../lib/theme";
 import { useEffect } from "react";
-import { Text } from "react-native";
+import { Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { exchangeLoginCode } from "../lib/auth-flow";
 import { supabase } from "../lib/supabase";
 
 export default function AuthCallback() {
@@ -9,8 +11,10 @@ export default function AuthCallback() {
   useEffect(() => {
     let active = true;
     void (async () => {
-      if (typeof code === "string" && code.length <= 4096)
-        await supabase.auth.exchangeCodeForSession(code);
+      await exchangeLoginCode(code, async (value) => {
+        const { data, error } = await supabase.auth.exchangeCodeForSession(value);
+        return { session: data.session, error };
+      });
       if (active) router.replace("/");
     })().catch(() => {
       if (active) router.replace("/login");
@@ -19,5 +23,16 @@ export default function AuthCallback() {
       active = false;
     };
   }, [code, router]);
-  return <Text>Completing sign-in…</Text>;
+  return (
+    <View
+      style={{
+        flex: 1,
+        backgroundColor: colors.background,
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <Text style={{ color: colors.text }}>Completing sign-in…</Text>
+    </View>
+  );
 }

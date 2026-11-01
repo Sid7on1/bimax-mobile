@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS reservations (
 CREATE INDEX IF NOT EXISTS idx_reservations_user_month ON reservations(user_id,month,status);
 CREATE INDEX IF NOT EXISTS idx_reservations_status_created ON reservations(status,created_at);
 CREATE TABLE IF NOT EXISTS relay_rooms (room_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z');
-CREATE TABLE IF NOT EXISTS relay_devices(room_id TEXT NOT NULL,device_id TEXT NOT NULL,hello_pubkey TEXT NOT NULL,PRIMARY KEY(room_id,device_id));
+CREATE TABLE IF NOT EXISTS relay_devices(room_id TEXT NOT NULL,device_id TEXT NOT NULL,hello_pubkey TEXT NOT NULL,renewal_id TEXT,PRIMARY KEY(room_id,device_id));
 CREATE TABLE IF NOT EXISTS budget_totals (
   user_id TEXT NOT NULL, month TEXT NOT NULL, tokens INTEGER NOT NULL DEFAULT 0,
   microusd INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id,month)

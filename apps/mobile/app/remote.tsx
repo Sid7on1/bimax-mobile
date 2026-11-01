@@ -1,582 +1,217 @@
-// app/remote.tsx
-import { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
+  Alert,
+  SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
-  View,
   TouchableOpacity,
-  TextInput,
-  ScrollView,
-  SafeAreaView,
-  Alert,
+  View,
 } from "react-native";
 import { useRouter } from "expo-router";
-import type { AgentState } from "@bimax/protocol";
+import { ChatDrawer } from "../components/ChatDrawer";
+import { colors } from "../lib/theme";
 import { useRelayContext } from "../lib/session";
-
-function getStatusBadgeColor(state: AgentState | "unknown"): {
-  bg: string;
-  text: string;
-} {
-  switch (state) {
-    case "working":
-      return { bg: "#dcfce7", text: "#15803d" };
-    case "waiting_approval":
-      return { bg: "#fef3c7", text: "#b45309" };
-    case "error":
-      return { bg: "#fee2e2", text: "#b91c1c" };
-    case "idle":
-      return { bg: "#f3f4f6", text: "#4b5563" };
-    default:
-      return { bg: "#f3f4f6", text: "#6b7280" };
-  }
-}
-
+/** Connection controls live here. Mac conversations live in the drawer's Mac tab. */
 export default function RemoteScreen() {
   const router = useRouter();
   const {
     status,
-    connectionError,
     trustedDesktop,
     sessions,
+    connectionRoute,
     pendingApprovals,
-    agentStatus,
-    remoteSessions,
-    commandLog,
-    sendInstruction,
-    requestSessionList,
     sendKill,
     lastKillAck,
+    cloudError,
+    retryCloud,
+    connectionError,
+    dropSession,
   } = useRelayContext();
-
-  const [instructionText, setInstructionText] = useState("");
-  const [composerError, setComposerError] = useState("");
-  const [secondsAgo, setSecondsAgo] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (status !== "idle") {
-      try {
-        requestSessionList();
-      } catch {
-        // ignore
-      }
-    }
-  }, [status, requestSessionList]);
-
-  useEffect(() => {
-    if (!agentStatus) {
-      setSecondsAgo(null);
-      return;
-    }
-    const updateDiff = () => {
-      const diff = Math.max(0, Math.floor((Date.now() - agentStatus.updatedAt) / 1000));
-      setSecondsAgo(diff);
-    };
-    updateDiff();
-    const interval = setInterval(updateDiff, 1000);
-    return () => clearInterval(interval);
-  }, [agentStatus]);
-
-  const handleSendInstruction = async () => {
-    setComposerError("");
-    if (!instructionText.trim()) {
-      setComposerError("Instruction cannot be empty.");
-      return;
-    }
-    if (status === "idle" || sessions.length === 0) {
-      setComposerError("Not connected to desktop. Connect or pair first.");
-      return;
-    }
-
-    try {
-      await sendInstruction(instructionText);
-      setInstructionText("");
-    } catch (err) {
-      setComposerError(err instanceof Error ? err.message : "Failed to send instruction");
-    }
-  };
-
-  const handleKillPress = () => {
-    Alert.alert("Kill agent?", "This immediately stops the desktop agent.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Kill",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            await sendKill("user requested from phone");
-          } catch (err) {
-            Alert.alert(
-              "Couldn't send kill signal",
-              err instanceof Error ? err.message : "Not connected",
+  const [error, setError] = useState("");
+  const ready =
+    status === "online" && sessions.some((s) => s.peerDeviceId === trustedDesktop?.deviceId);
+  const cloudConfigured = trustedDesktop?.relayUrl.startsWith("wss:") === true;
+  const stop = () =>
+    Alert.alert(
+      "Stop all Mac activity?",
+      "This stops all running Bimax conversations on your Mac.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Stop all",
+          style: "destructive",
+          onPress: () => {
+            setError("");
+            void sendKill("User stopped Mac activity").catch(() =>
+              setError("Could not confirm Stop. Your Mac may be offline."),
             );
-          }
+          },
         },
-      },
-    ]);
-  };
-
-  const agentState: AgentState | "unknown" = agentStatus?.state ?? "unknown";
-  const badgeColors = getStatusBadgeColor(agentState);
-  const isNoTrustedDesktop = !trustedDesktop;
-  const isReconnecting = !!trustedDesktop && status !== "online";
-
+      ],
+    );
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.page}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Text style={styles.backButtonText}>← Back</Text>
-        </TouchableOpacity>
-        <View>
-          <Text style={styles.headerTitle}>Bimax Remote</Text>
-          <View style={styles.statusRow}>
-            <View
-              style={[
-                styles.statusDot,
-                status === "online" ? styles.statusDotOnline : styles.statusDotOffline,
-              ]}
-            />
-            <Text style={styles.statusText}>{status}</Text>
-          </View>
-        </View>
-
-        <View style={[styles.agentBadge, { backgroundColor: badgeColors.bg }]}>
-          <Text style={[styles.agentBadgeText, { color: badgeColors.text }]}>
-            {agentState.toUpperCase()}
-          </Text>
-        </View>
+        <ChatDrawer />
+        <Text style={styles.title}>Mac connection</Text>
+        <View style={{ width: 44 }} />
       </View>
-
       <ScrollView contentContainerStyle={styles.content}>
-        {connectionError && (
-          <View style={styles.pairCard}>
-            <Text style={styles.cardTitle}>Secure connection needs attention</Text>
-            <Text style={styles.cardBody}>{connectionError}</Text>
-            <TouchableOpacity style={styles.primaryButton} onPress={() => router.push("/pair")}>
-              <Text style={styles.primaryButtonText}>Scan Desktop QR</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-        {isNoTrustedDesktop && (
-          <View style={styles.pairCard}>
-            <Text style={styles.cardTitle}>No Paired Desktop</Text>
-            <Text style={styles.cardBody}>
-              Pair this mobile remote with your Bimax desktop app to control agents, approve tools,
-              and view live sessions.
-            </Text>
-            <TouchableOpacity style={styles.primaryButton} onPress={() => router.push("/pair")}>
-              <Text style={styles.primaryButtonText}>Pair a Desktop</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {isReconnecting && (
-          <View style={styles.pairCard}>
-            <Text style={styles.cardTitle}>Reconnecting to desktop…</Text>
-            <Text style={styles.cardBody}>
-              Your paired desktop is configured but unreachable. Make sure the laptop is awake and
-              on the network — no need to pair again.
-            </Text>
-          </View>
-        )}
-
-        {pendingApprovals.length > 0 && (
-          <TouchableOpacity style={styles.approvalBanner} onPress={() => router.push("/approvals")}>
-            <Text style={styles.approvalBannerText}>
-              ⚠️ {pendingApprovals.length} approval
-              {pendingApprovals.length > 1 ? "s" : ""} waiting
-            </Text>
-            <Text style={styles.approvalBannerSubtext}>Tap to review →</Text>
-          </TouchableOpacity>
-        )}
-
         <View style={styles.card}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>Agent Status</Text>
-            {secondsAgo !== null && (
-              <Text style={styles.timestampText}>Updated {secondsAgo}s ago</Text>
-            )}
-          </View>
-
-          {agentStatus ? (
-            <View>
-              {agentStatus.sessionId && (
-                <Text style={styles.sessionMetaText}>Session: {agentStatus.sessionId}</Text>
-              )}
-              <Text style={styles.taskSummaryText}>
-                {agentStatus.taskSummary || "No active task description"}
-              </Text>
-            </View>
-          ) : (
-            <Text style={styles.cardPlaceholderText}>
-              Waiting for desktop agent status report...
+          <Text style={styles.cardTitle}>
+            {ready
+              ? "Your Mac is connected"
+              : trustedDesktop
+                ? "Your Mac is not connected"
+                : "Connect your Mac"}
+          </Text>
+          <Text style={styles.detail}>
+            {ready
+              ? "Continue your conversations from Chat history → Mac."
+              : trustedDesktop
+                ? "Keep Bimax open on your Mac, with the Mac awake and online."
+                : "Pair once in Mac Settings → Phone connection to continue your chats here."}
+          </Text>
+          <View style={styles.row}>
+            <Text style={styles.label}>Current connection</Text>
+            <Text style={styles.value}>
+              {ready
+                ? connectionRoute === "cloud"
+                  ? "Cloudflare"
+                  : connectionRoute === "lan"
+                    ? "Local network"
+                    : "Checking…"
+                : "Offline"}
             </Text>
-          )}
-        </View>
-
-        <View style={styles.card}>
-          <View style={styles.cardHeaderRow}>
-            <Text style={styles.cardTitle}>Active Sessions</Text>
+          </View>
+          <View style={styles.row}>
+            <Text style={styles.label}>Access away from home</Text>
+            <Text style={styles.value}>{cloudConfigured ? "Configured" : "Not set up"}</Text>
+          </View>
+          {!!trustedDesktop && (
             <TouchableOpacity
-              style={styles.refreshButton}
+              accessibilityRole="button"
+              accessibilityLabel="Reconnect to Mac"
+              style={styles.button}
               onPress={() => {
-                try {
-                  requestSessionList();
-                } catch (err) {
-                  setComposerError(err instanceof Error ? err.message : "Failed to refresh");
-                }
+                setError("");
+                dropSession(trustedDesktop.deviceId);
               }}
             >
-              <Text style={styles.refreshButtonText}>Refresh</Text>
+              <Text style={styles.buttonText}>Reconnect</Text>
             </TouchableOpacity>
-          </View>
-
-          {remoteSessions.length === 0 ? (
-            <Text style={styles.cardPlaceholderText}>No active sessions reported.</Text>
-          ) : (
-            remoteSessions.map((s) => {
-              const itemBadge = getStatusBadgeColor(s.status);
-              return (
-                <View key={s.sessionId} style={styles.sessionItem}>
-                  <View style={styles.sessionItemMain}>
-                    <Text style={styles.sessionItemTitle}>{s.title}</Text>
-                    <Text style={styles.sessionItemId}>{s.sessionId}</Text>
-                  </View>
-                  <View style={[styles.sessionItemBadge, { backgroundColor: itemBadge.bg }]}>
-                    <Text style={[styles.sessionItemBadgeText, { color: itemBadge.text }]}>
-                      {s.status}
-                    </Text>
-                  </View>
-                </View>
-              );
-            })
           )}
         </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Send Instruction</Text>
-          <TextInput
-            style={styles.composerInput}
-            value={instructionText}
-            onChangeText={(text) => {
-              setInstructionText(text);
-              if (composerError) setComposerError("");
-            }}
-            placeholder="Tell Bimax what to do..."
-            placeholderTextColor="#9ca3af"
-            multiline
-            numberOfLines={3}
-          />
-          {composerError ? <Text style={styles.errorText}>{composerError}</Text> : null}
-          <TouchableOpacity style={styles.primaryButton} onPress={handleSendInstruction}>
-            <Text style={styles.primaryButtonText}>Send Instruction</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Recent Commands</Text>
-          {commandLog.length === 0 ? (
-            <Text style={styles.cardPlaceholderText}>No commands sent yet.</Text>
-          ) : (
-            commandLog
-              .slice()
-              .reverse()
-              .map((cmd) => {
-                const icon = cmd.status === "acked" ? "✓" : cmd.status === "failed" ? "✗" : "…";
-                const iconColor =
-                  cmd.status === "acked"
-                    ? "#16a34a"
-                    : cmd.status === "failed"
-                      ? "#dc2626"
-                      : "#d97706";
-                return (
-                  <View key={cmd.idempotencyKey} style={styles.logItem}>
-                    <View style={styles.logHeader}>
-                      <Text style={[styles.logIcon, { color: iconColor }]}>
-                        {icon} {cmd.status.toUpperCase()}
-                      </Text>
-                      <Text style={styles.logTime}>{new Date(cmd.at).toLocaleTimeString()}</Text>
-                    </View>
-                    <Text style={styles.logInstruction}>{cmd.instruction}</Text>
-                    {cmd.summary && <Text style={styles.logSummary}>{cmd.summary}</Text>}
-                  </View>
-                );
-              })
-          )}
-        </View>
-
-        <TouchableOpacity style={styles.killButton} onPress={handleKillPress}>
-          <Text style={styles.killButtonText}>Kill Agent</Text>
-        </TouchableOpacity>
-        {lastKillAck ? (
-          <Text style={[styles.killAckText, { color: lastKillAck.ok ? "#16a34a" : "#dc2626" }]}>
-            {lastKillAck.ok
-              ? "✓ Kill acknowledged"
-              : `✗ Kill failed${lastKillAck.detail ? `: ${lastKillAck.detail}` : ""}`}
+        {!!(error || connectionError || cloudError) && (
+          <Text accessibilityRole="alert" style={styles.error}>
+            {error || connectionError || cloudError}
           </Text>
-        ) : null}
+        )}
+        {!!trustedDesktop && (!cloudConfigured || !!cloudError) && (
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Enable access away from home"
+            style={styles.button}
+            onPress={retryCloud}
+          >
+            <Text style={styles.buttonText}>
+              {cloudConfigured ? "Retry internet setup" : "Enable access away from home"}
+            </Text>
+          </TouchableOpacity>
+        )}
+        <Text style={styles.section}>USING YOUR PHONE AWAY FROM HOME</Text>
+        <View style={styles.card}>
+          <Text style={styles.detail}>
+            When Current connection shows Cloudflare, Mac chats can work over cellular data or
+            another Wi-Fi network. Your Mac must stay awake, online, and running Bimax. Messages
+            remain encrypted between your devices.
+          </Text>
+          <Text style={styles.detail}>
+            Local network needs both devices on the same network. “Configured” means internet access
+            has been set up; check the current connection before relying on it away from home.
+          </Text>
+          <Text style={styles.detail}>
+            In this Expo Go development version, opening or reloading Bimax still needs the app’s
+            development server on your Mac. The current server uses your home Wi-Fi. An installed
+            app build is needed for reliable opening away from home.
+          </Text>
+        </View>
+        <Text style={styles.section}>MAC CONTROLS</Text>
+        <View style={styles.card}>
+          <Text style={styles.detail}>
+            Your Mac owns its models, workspace, tools, and system permissions. Change those
+            settings in Bimax on your Mac. Review requested actions here on your phone.
+          </Text>
+          {pendingApprovals.length > 0 && (
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Review Mac actions"
+              style={styles.button}
+              onPress={() => router.push("/approvals")}
+            >
+              <Text style={styles.buttonText}>Review actions ({pendingApprovals.length})</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            accessibilityRole="button"
+            style={styles.button}
+            onPress={() => router.push("/pair")}
+          >
+            <Text style={styles.buttonText}>
+              {trustedDesktop ? "Pair a different Mac" : "Pair your Mac"}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Stop all Mac activity"
+            disabled={!ready}
+            style={[styles.button, !ready && { opacity: 0.4 }]}
+            onPress={stop}
+          >
+            <Text style={[styles.buttonText, { color: colors.danger }]}>Stop all Mac activity</Text>
+          </TouchableOpacity>
+          {!!lastKillAck && (
+            <Text accessibilityRole="text" style={styles.detail}>
+              {lastKillAck.ok ? "Your Mac acknowledged the last Stop request." : "Your Mac could not stop all activity. Check Bimax on your Mac."}
+            </Text>
+          )}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
-
 const styles = StyleSheet.create({
-  killAckText: {
-    fontSize: 13,
-    fontWeight: "600",
-    textAlign: "center",
-    marginTop: 8,
-  },
-  safeArea: {
-    flex: 1,
-    backgroundColor: "#ffffff",
-  },
+  page: { flex: 1, backgroundColor: colors.background },
   header: {
+    minHeight: 64,
+    paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#e5e7eb",
   },
-  backButton: {
-    paddingRight: 8,
-  },
-  backButtonText: {
-    fontSize: 14,
-    color: "#007aff",
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: "#111827",
-  },
-  statusRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 2,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 6,
-  },
-  statusDotOnline: {
-    backgroundColor: "#16a34a",
-  },
-  statusDotOffline: {
-    backgroundColor: "#9ca3af",
-  },
-  statusText: {
-    fontSize: 12,
-    color: "#6b7280",
-    textTransform: "capitalize",
-  },
-  agentBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  agentBadgeText: {
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  content: {
-    padding: 16,
-    paddingBottom: 32,
-  },
-  pairCard: {
-    backgroundColor: "#f9fafb",
-    borderWidth: 1,
-    borderColor: "#e5e7eb",
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-  },
-  card: {
-    backgroundColor: "#ffffff",
-    borderWidth: 1,
-    borderColor: "#e5e7eb",
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
-  },
-  cardHeaderRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 8,
-  },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#111827",
-    marginBottom: 6,
-  },
-  cardBody: {
-    fontSize: 14,
-    color: "#4b5563",
-    lineHeight: 20,
-    marginBottom: 16,
-  },
-  cardPlaceholderText: {
-    fontSize: 14,
-    color: "#9ca3af",
-    fontStyle: "italic",
-  },
-  timestampText: {
-    fontSize: 12,
-    color: "#6b7280",
-  },
-  sessionMetaText: {
-    fontSize: 12,
-    fontFamily: "monospace",
-    color: "#6b7280",
-    marginBottom: 4,
-  },
-  taskSummaryText: {
-    fontSize: 14,
-    color: "#1f2937",
-    lineHeight: 20,
-  },
-  approvalBanner: {
-    backgroundColor: "#fef3c7",
-    borderWidth: 1,
-    borderColor: "#f59e0b",
-    borderRadius: 10,
-    padding: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 16,
-  },
-  approvalBannerText: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#92400e",
-  },
-  approvalBannerSubtext: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#b45309",
-  },
-  refreshButton: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: "#f3f4f6",
-    borderRadius: 6,
-  },
-  refreshButtonText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#374151",
-  },
-  sessionItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#f3f4f6",
-  },
-  sessionItemMain: {
-    flex: 1,
-    marginRight: 8,
-  },
-  sessionItemTitle: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: "#111827",
-  },
-  sessionItemId: {
+  title: { fontSize: 17, fontWeight: "600", color: colors.text },
+  content: { padding: 20, paddingBottom: 40, gap: 16 },
+  card: { padding: 18, borderRadius: 16, backgroundColor: colors.surface, gap: 16 },
+  cardTitle: { fontSize: 21, lineHeight: 28, color: colors.text, fontWeight: "600" },
+  section: {
     fontSize: 11,
-    color: "#9ca3af",
-    fontFamily: "monospace",
-  },
-  sessionItemBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
-  },
-  sessionItemBadgeText: {
-    fontSize: 11,
+    letterSpacing: 1,
+    color: colors.muted,
     fontWeight: "600",
+    marginTop: 12,
   },
-  composerInput: {
-    backgroundColor: "#f9fafb",
-    borderWidth: 1,
-    borderColor: "#d1d5db",
-    borderRadius: 8,
-    padding: 10,
-    fontSize: 14,
-    color: "#111827",
-    minHeight: 70,
-    textAlignVertical: "top",
-    marginBottom: 10,
+  detail: { fontSize: 14, lineHeight: 22, color: colors.secondary },
+  row: { flexDirection: "row", justifyContent: "space-between", flexWrap: "wrap", gap: 10 },
+  label: { color: colors.secondary, fontSize: 13 },
+  value: { color: colors.text, fontSize: 13 },
+  button: {
+    minHeight: 48,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: colors.background,
+    justifyContent: "center",
   },
-  errorText: {
-    color: "#dc2626",
-    fontSize: 13,
-    marginBottom: 8,
-  },
-  primaryButton: {
-    backgroundColor: "#111827",
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: "center",
-  },
-  primaryButtonText: {
-    color: "#ffffff",
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  logItem: {
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#f3f4f6",
-  },
-  logHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 2,
-  },
-  logIcon: {
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  logTime: {
-    fontSize: 11,
-    color: "#9ca3af",
-  },
-  logInstruction: {
-    fontSize: 13,
-    color: "#1f2937",
-  },
-  logSummary: {
-    fontSize: 12,
-    color: "#4b5563",
-    marginTop: 2,
-    fontStyle: "italic",
-  },
-  killButton: {
-    backgroundColor: "#dc2626",
-    paddingVertical: 14,
-    borderRadius: 8,
-    alignItems: "center",
-    marginTop: 8,
-    marginBottom: 16,
-  },
-  killButtonText: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "700",
-  },
+  buttonText: { color: colors.text, fontSize: 15, fontWeight: "500", textAlign: "center" },
+  error: { color: colors.danger, lineHeight: 22, fontSize: 14 },
 });

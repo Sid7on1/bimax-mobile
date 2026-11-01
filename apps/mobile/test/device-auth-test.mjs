@@ -1,0 +1,8 @@
+import assert from 'node:assert/strict';import {test} from 'node:test';
+import {createRequire} from 'node:module';import {readFileSync} from 'node:fs';import vm from 'node:vm';
+const require=createRequire(import.meta.url),ts=require('typescript');
+const code=ts.transpileModule(readFileSync('apps/mobile/lib/approvals/device-auth.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+function fixture(expoGo,result){let options;const exports={};vm.runInNewContext(code,{exports,require:id=>id==='expo'?{isRunningInExpoGo:()=>expoGo}:{authenticateAsync:async value=>{options=value;if(result instanceof Error)throw result;return result;}}});return {confirm:exports.confirmPhoneDecision,options:()=>options};}
+test('Expo Go permits an OS passcode fallback, with strong biometric policy and explicit success',async()=>{const f=fixture(true,{success:true});assert.equal(await f.confirm('Approve the displayed action'),true);assert.equal(f.options().disableDeviceFallback,false);assert.equal(f.options().biometricsSecurityLevel,'strong');assert.equal(f.options().promptMessage,'Approve the displayed action');});
+test('installed app retains strong biometric-only decisions',async()=>{const f=fixture(false,{success:true});assert.equal(await f.confirm('Deny'),true);assert.equal(f.options().disableDeviceFallback,true);});
+test('cancel, failed authentication and OS errors never authorize a tool action',async()=>{for(const result of [{success:false,error:'user_cancel'},{success:false,error:'authentication_failed'}]){const f=fixture(true,result);assert.equal(await f.confirm('Approve'),false);}await assert.rejects(()=>fixture(true,Error('OS unavailable')).confirm('Approve'),/OS unavailable/);});

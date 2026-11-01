@@ -1,3 +1,4 @@
+import { colors } from "../lib/theme";
 // app/login.tsx
 import React, { useState, useEffect } from "react";
 import {
@@ -14,7 +15,8 @@ import {
 } from "react-native";
 import { useRouter } from "expo-router";
 import * as WebBrowser from "expo-web-browser";
-import { makeRedirectUri } from "expo-auth-session";
+import { isRunningInExpoGo } from "expo";
+import { authServiceHealth, signInWithBrowser, type AuthHealth } from "../lib/auth-flow";
 import { supabase } from "../lib/supabase";
 
 WebBrowser.maybeCompleteAuthSession();
@@ -25,6 +27,23 @@ export default function LoginScreen() {
   const [otpCode, setOtpCode] = useState("");
   const [isOtpSent, setIsOtpSent] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [health, setHealth] = useState<AuthHealth>();
+  const [healthAttempt, setHealthAttempt] = useState(0);
+  const expoGo = isRunningInExpoGo();
+  const serviceUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? "";
+  const publicKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? "";
+  const canSignIn = health?.ok === true && !loading;
+
+  useEffect(() => {
+    let active = true;
+    setHealth(undefined);
+    void authServiceHealth(serviceUrl, publicKey).then((result) => {
+      if (active) setHealth(result);
+    });
+    return () => {
+      active = false;
+    };
+  }, [serviceUrl, publicKey, healthAttempt]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -47,40 +66,24 @@ export default function LoginScreen() {
   const handleOAuthSignIn = async (provider: "google" | "github") => {
     setLoading(true);
     try {
-      const configuredRedirect = process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL;
-      if (!configuredRedirect && !__DEV__) throw new Error("Use email sign-in for this build");
-      const redirectUri = configuredRedirect || makeRedirectUri({ scheme: "bimax" });
-
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider,
-        options: {
-          redirectTo: redirectUri,
-          skipBrowserRedirect: true,
+      await signInWithBrowser({
+        expoGo,
+        redirect: process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL,
+        serviceUrl,
+        health: () => authServiceHealth(serviceUrl, publicKey),
+        authorize: async (redirectTo) => {
+          const { data, error } = await supabase.auth.signInWithOAuth({
+            provider,
+            options: { redirectTo, skipBrowserRedirect: true },
+          });
+          return { url: data.url, error };
+        },
+        open: WebBrowser.openAuthSessionAsync,
+        exchange: async (code) => {
+          const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+          return { session: data.session, error };
         },
       });
-
-      if (error) throw error;
-      if (data?.url) {
-        const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUri);
-        if (result.type === "success" && result.url) {
-          const url = new URL(result.url);
-          const expected = new URL(redirectUri);
-          if (
-            url.origin !== expected.origin ||
-            url.pathname !== expected.pathname ||
-            url.protocol !== expected.protocol
-          )
-            throw new Error("Unexpected sign-in callback");
-          // PKCE flow: code in query string, must be exchanged for a session
-          const code = url.searchParams.get("code");
-          if (code) {
-            const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
-            if (exchangeError) throw exchangeError;
-          } else {
-            throw new Error("Sign-in did not return an authorization code. Please try again.");
-          }
-        }
-      }
     } catch (err: any) {
       Alert.alert("Sign In Failed", err.message || String(err));
     } finally {
@@ -96,6 +99,9 @@ export default function LoginScreen() {
 
     setLoading(true);
     try {
+      const currentHealth = await authServiceHealth(serviceUrl, publicKey);
+      setHealth(currentHealth);
+      if (!currentHealth.ok) throw new Error(currentHealth.message);
       const { error } = await supabase.auth.signInWithOtp({
         email: email.trim(),
       });
@@ -138,17 +144,35 @@ export default function LoginScreen() {
     >
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.brandBox}>
-          <Text style={styles.logo}>✦ Bimax</Text>
-          <Text style={styles.tagline}>Intelligent standalone mobile chat</Text>
+          <Text style={styles.logo}>Bimax</Text>
+          <Text style={styles.tagline}>Think, write, and build with Bimax.</Text>
         </View>
 
-        {/* OAuth Buttons */}
-        {(__DEV__ || process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL) && (
+        {health === undefined ? (
+          <Text style={styles.otpNotice} accessibilityRole="status">
+            Checking sign-in availability…
+          </Text>
+        ) : !health.ok ? (
+          <View style={styles.emailBox}>
+            <Text style={styles.otpNotice} accessibilityRole="alert">
+              {health.message}
+            </Text>
+            <TouchableOpacity
+              style={styles.oauthButton}
+              disabled={loading}
+              onPress={() => setHealthAttempt((attempt) => attempt + 1)}
+            >
+              <Text style={styles.oauthText}>Try sign-in service again</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+        {/* OAuth is available only with the installed app's verified return link. */}
+        {!expoGo && process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL && (
           <View style={styles.oauthContainer}>
             <TouchableOpacity
               style={styles.oauthButton}
               onPress={() => handleOAuthSignIn("google")}
-              disabled={loading}
+              disabled={!canSignIn}
               activeOpacity={0.8}
             >
               <Text style={styles.oauthText}>Continue with Google</Text>
@@ -157,7 +181,7 @@ export default function LoginScreen() {
             <TouchableOpacity
               style={[styles.oauthButton, styles.githubButton]}
               onPress={() => handleOAuthSignIn("github")}
-              disabled={loading}
+              disabled={!canSignIn}
               activeOpacity={0.8}
             >
               <Text style={styles.githubText}>Continue with GitHub</Text>
@@ -166,7 +190,9 @@ export default function LoginScreen() {
         )}
         <View style={styles.dividerRow}>
           <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>or continue with email</Text>
+          <Text style={styles.dividerText}>
+            {expoGo ? "Sign in with email" : "or continue with email"}
+          </Text>
           <View style={styles.dividerLine} />
         </View>
 
@@ -174,9 +200,10 @@ export default function LoginScreen() {
         {!isOtpSent ? (
           <View style={styles.emailBox}>
             <TextInput
+              keyboardAppearance="dark"
               style={styles.input}
               placeholder="Enter your email"
-              placeholderTextColor="#8e8e93"
+              placeholderTextColor={colors.muted}
               keyboardType="email-address"
               autoCapitalize="none"
               autoCorrect={false}
@@ -184,15 +211,25 @@ export default function LoginScreen() {
               onChangeText={setEmail}
             />
             <TouchableOpacity
-              style={[styles.primaryButton, !email.trim() && styles.primaryButtonDisabled]}
+              style={[
+                styles.primaryButton,
+                (!canSignIn || !email.trim()) && styles.primaryButtonDisabled,
+              ]}
               onPress={handleSendOtp}
-              disabled={loading || !email.trim()}
+              disabled={!canSignIn || !email.trim()}
               activeOpacity={0.8}
             >
               {loading ? (
-                <ActivityIndicator color="#ffffff" />
+                <ActivityIndicator color={colors.text} />
               ) : (
-                <Text style={styles.primaryButtonText}>Send Login Code</Text>
+                <Text
+                  style={[
+                    styles.primaryButtonText,
+                    (!canSignIn || !email.trim()) && styles.disabledButtonText,
+                  ]}
+                >
+                  Send Login Code
+                </Text>
               )}
             </TouchableOpacity>
           </View>
@@ -204,9 +241,10 @@ export default function LoginScreen() {
             </Text>
 
             <TextInput
+              keyboardAppearance="dark"
               style={[styles.input, styles.otpInput]}
               placeholder="000000"
-              placeholderTextColor="#8e8e93"
+              placeholderTextColor={colors.muted}
               keyboardType="number-pad"
               maxLength={6}
               value={otpCode}
@@ -216,16 +254,23 @@ export default function LoginScreen() {
             <TouchableOpacity
               style={[
                 styles.primaryButton,
-                otpCode.trim().length !== 6 && styles.primaryButtonDisabled,
+                (!canSignIn || otpCode.trim().length !== 6) && styles.primaryButtonDisabled,
               ]}
               onPress={handleVerifyOtp}
-              disabled={loading || otpCode.trim().length !== 6}
+              disabled={!canSignIn || otpCode.trim().length !== 6}
               activeOpacity={0.8}
             >
               {loading ? (
-                <ActivityIndicator color="#ffffff" />
+                <ActivityIndicator color={colors.text} />
               ) : (
-                <Text style={styles.primaryButtonText}>Verify & Sign In</Text>
+                <Text
+                  style={[
+                    styles.primaryButtonText,
+                    (!canSignIn || otpCode.trim().length !== 6) && styles.disabledButtonText,
+                  ]}
+                >
+                  Verify &amp; Sign In
+                </Text>
               )}
             </TouchableOpacity>
 
@@ -233,6 +278,11 @@ export default function LoginScreen() {
               <Text style={styles.backButtonText}>Use a different email</Text>
             </TouchableOpacity>
           </View>
+        )}
+        {expoGo && (
+          <Text style={styles.runtimeNote}>
+            Google and GitHub sign-in require a Bimax development build.
+          </Text>
         )}
       </ScrollView>
     </KeyboardAvoidingView>
@@ -242,7 +292,7 @@ export default function LoginScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#ffffff",
+    backgroundColor: colors.background,
   },
   scroll: {
     flexGrow: 1,
@@ -257,29 +307,29 @@ const styles = StyleSheet.create({
   logo: {
     fontSize: 34,
     fontWeight: "800",
-    color: "#000000",
+    color: colors.text,
     letterSpacing: -0.5,
   },
   tagline: {
     fontSize: 16,
-    color: "#636366",
+    color: colors.secondary,
     marginTop: 6,
   },
   oauthContainer: {
     gap: 12,
   },
   oauthButton: {
-    backgroundColor: "#f2f2f7",
+    backgroundColor: colors.surface,
     paddingVertical: 14,
     borderRadius: 14,
     alignItems: "center",
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#d1d1d6",
+    borderColor: colors.border,
   },
   oauthText: {
     fontSize: 16,
     fontWeight: "600",
-    color: "#000000",
+    color: colors.text,
   },
   githubButton: {
     backgroundColor: "#24292e",
@@ -288,7 +338,7 @@ const styles = StyleSheet.create({
   githubText: {
     fontSize: 16,
     fontWeight: "600",
-    color: "#ffffff",
+    color: colors.text,
   },
   dividerRow: {
     flexDirection: "row",
@@ -298,12 +348,12 @@ const styles = StyleSheet.create({
   dividerLine: {
     flex: 1,
     height: StyleSheet.hairlineWidth,
-    backgroundColor: "#c6c6c8",
+    backgroundColor: colors.border,
   },
   dividerText: {
     marginHorizontal: 12,
     fontSize: 13,
-    color: "#8e8e93",
+    color: colors.muted,
     fontWeight: "500",
   },
   emailBox: {
@@ -314,17 +364,17 @@ const styles = StyleSheet.create({
   },
   otpNotice: {
     fontSize: 15,
-    color: "#3a3a3c",
+    color: colors.secondary,
     textAlign: "center",
     lineHeight: 22,
   },
   input: {
-    backgroundColor: "#f2f2f7",
+    backgroundColor: colors.surface,
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 14,
     fontSize: 16,
-    color: "#000000",
+    color: colors.text,
   },
   otpInput: {
     textAlign: "center",
@@ -333,18 +383,26 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   primaryButton: {
-    backgroundColor: "#007aff",
+    backgroundColor: colors.button,
     paddingVertical: 15,
     borderRadius: 14,
     alignItems: "center",
   },
   primaryButtonDisabled: {
-    backgroundColor: "#b0b0b8",
+    backgroundColor: colors.raised,
   },
+  disabledButtonText: { color: colors.muted },
   primaryButtonText: {
     fontSize: 16,
     fontWeight: "600",
-    color: "#ffffff",
+    color: colors.buttonText,
+  },
+  runtimeNote: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: "center",
+    marginTop: 24,
   },
   backButton: {
     alignItems: "center",
@@ -352,6 +410,6 @@ const styles = StyleSheet.create({
   },
   backButtonText: {
     fontSize: 14,
-    color: "#007aff",
+    color: colors.text,
   },
 });

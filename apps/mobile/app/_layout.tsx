@@ -1,16 +1,20 @@
+import { StatusBar } from "expo-status-bar";
+import { colors } from "../lib/theme";
 import { removeLegacyDeviceKeys } from "../lib/crypto/secure-store";
 import { sealLegacyHistory } from "../lib/chat-store";
 import * as ExpoCrypto from "expo-crypto";
 import { configureRandomBytes } from "../lib/crypto/keys";
 import React, { useEffect, useState } from "react";
 import { Slot, useRouter, useSegments } from "expo-router";
-import { View, ActivityIndicator, StyleSheet } from "react-native";
+import { View, ActivityIndicator, StyleSheet, Appearance } from "react-native";
+import { PhonePreferencesProvider } from "../lib/preferences-context";
 import { RelayProvider } from "../lib/session/provider";
 import type { Session } from "@supabase/supabase-js";
 import { setActiveAccount } from "../lib/account-scope";
 import { clearApprovals } from "../lib/approvals/approvals";
 import { supabase } from "../lib/supabase";
 
+Appearance.setColorScheme("dark");
 configureRandomBytes((length) => ExpoCrypto.getRandomBytes(length));
 
 export default function RootLayout() {
@@ -67,16 +71,27 @@ export default function RootLayout() {
   if (initializing) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#007aff" />
+        <ActivityIndicator size="large" color={colors.text} />
       </View>
     );
   }
 
   // Unmount transport, sessions, and account UI immediately on sign-out.
-  if (!session) return ["login", "auth-callback"].includes(segments[0]) ? <Slot /> : null;
+  if (!session)
+    return ["login", "auth-callback"].includes(segments[0]) ? (
+      <>
+        <StatusBar style="light" />
+        <Slot />
+      </>
+    ) : null;
   return (
     <RelayProvider key={session.user.id}>
-      <Slot />
+      <PhonePreferencesProvider>
+        <>
+          <StatusBar style="light" />
+          <Slot />
+        </>
+      </PhonePreferencesProvider>
     </RelayProvider>
   );
 }
@@ -86,6 +101,6 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#ffffff",
+    backgroundColor: colors.background,
   },
 });

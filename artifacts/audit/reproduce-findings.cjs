@@ -16,6 +16,7 @@ require.extensions[".ts"] = (mod, file) =>
   );
 const originalLoad = Module._load;
 Module._load = function (id, ...args) {
+  if (id === "expo/fetch") return { fetch: globalThis.fetch };
   if (id.endsWith("/supabase") || id === "./supabase") {
     return {
       supabase: {

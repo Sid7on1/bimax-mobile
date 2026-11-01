@@ -28,7 +28,7 @@ class File {
   open() {
     const bytes = fileBytes.get(this.uri);
     return {
-      readBytes: (size) => {
+      readBytes: async (size) => {
         largestRead = Math.max(largestRead, size);
         return bytes.slice(0, size);
       },
@@ -491,6 +491,14 @@ async function main() {
   const config = local("apps/mobile/app.config.cjs");
   try {
     delete process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL;
+    const supplied = { ...local("apps/mobile/app.json").expo, name: "Provided config", android: { retained: true }, ios: { retained: true } };
+    const suppliedBefore = structuredClone(supplied);
+    const merged = config({ config: supplied });
+    assert.equal(merged.name, "Provided config");
+    assert.equal(merged.android.retained, true);
+    assert.equal(merged.android.allowBackup, false);
+    assert.equal(merged.ios.retained, true);
+    assert.deepEqual(supplied, suppliedBefore);
     assert.equal(config().android.allowBackup, false);
     assert.equal(config().ios.associatedDomains, undefined);
     process.env.EXPO_PUBLIC_AUTH_REDIRECT_URL = "https://login.example.test/auth/callback";

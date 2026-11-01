@@ -53,7 +53,12 @@ const reapTimer = setInterval(() => relay.reapIdle(), 60_000);
 (reapTimer as unknown as NodeJS.Timeout).unref();
 
 server.listen(PORT, HOST, () => {
-  console.log(`Bimax relay listening on port ${PORT}`);
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Relay address unavailable");
+  console.log(`Bimax relay listening on port ${address.port}`);
+  // Report the socket we actually own to parent-process integration runners. Port zero lets
+  // independent suites avoid fixed-port collisions without a check-then-bind race.
+  process.send?.({ type: "relay-listening", port: address.port });
 });
 
 process.on("SIGINT", () => {

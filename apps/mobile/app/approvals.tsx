@@ -1,3 +1,4 @@
+import { colors } from "../lib/theme";
 import { useState, useEffect } from "react";
 import {
   StyleSheet,
@@ -85,7 +86,7 @@ function ApprovalCard({
       {errorMsg ? <Text style={styles.cardError}>{errorMsg}</Text> : null}
 
       {loading ? (
-        <ActivityIndicator style={{ marginVertical: 12 }} color="#111827" />
+        <ActivityIndicator style={{ marginVertical: 12 }} color={colors.text} />
       ) : isExpired ? null : showDenyOptions ? (
         <View style={styles.denyOptionsContainer}>
           <Text style={styles.denyOptionsTitle}>Select denial reason:</Text>
@@ -151,7 +152,7 @@ export default function ApprovalsScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#ffffff",
+    backgroundColor: colors.background,
   },
   header: {
     flexDirection: "row",
@@ -160,7 +161,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#e5e7eb",
+    borderBottomColor: colors.border,
   },
   backButton: {
     paddingVertical: 6,
@@ -168,12 +169,12 @@ const styles = StyleSheet.create({
   },
   backButtonText: {
     fontSize: 16,
-    color: "#2563eb",
+    color: colors.text,
   },
   headerTitle: {
     fontSize: 17,
     fontWeight: "600",
-    color: "#111827",
+    color: colors.text,
   },
   headerSpacer: {
     width: 60,
@@ -190,12 +191,12 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 16,
-    color: "#6b7280",
+    color: colors.secondary,
   },
   card: {
-    backgroundColor: "#f9fafb",
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: "#e5e7eb",
+    borderColor: colors.border,
     borderRadius: 12,
     padding: 16,
     marginBottom: 16,
@@ -209,24 +210,24 @@ const styles = StyleSheet.create({
   toolName: {
     fontSize: 18,
     fontWeight: "700",
-    color: "#111827",
+    color: colors.text,
   },
   timer: {
     fontSize: 13,
     fontWeight: "600",
-    color: "#059669",
+    color: colors.success,
   },
   timerExpired: {
-    color: "#dc2626",
+    color: colors.danger,
   },
   summaryText: {
     fontSize: 15,
-    color: "#374151",
+    color: colors.secondary,
     marginBottom: 12,
     lineHeight: 20,
   },
   detailBox: {
-    backgroundColor: "#1f2937",
+    backgroundColor: colors.raised,
     borderRadius: 8,
     padding: 12,
     marginBottom: 12,
@@ -236,18 +237,18 @@ const styles = StyleSheet.create({
     maxHeight: 136,
   },
   detailText: {
-    color: "#f3f4f6",
+    color: colors.text,
     fontFamily: "monospace",
     fontSize: 13,
     lineHeight: 18,
   },
   metaText: {
     fontSize: 12,
-    color: "#6b7280",
+    color: colors.secondary,
     marginBottom: 4,
   },
   cardError: {
-    color: "#dc2626",
+    color: colors.danger,
     fontSize: 13,
     marginVertical: 8,
     fontWeight: "500",
@@ -259,42 +260,42 @@ const styles = StyleSheet.create({
   },
   approveButton: {
     flex: 1,
-    backgroundColor: "#16a34a",
+    backgroundColor: colors.successSurface,
     paddingVertical: 12,
     borderRadius: 8,
     alignItems: "center",
   },
   approveButtonText: {
-    color: "#ffffff",
+    color: colors.text,
     fontWeight: "600",
     fontSize: 15,
   },
   denyButton: {
     flex: 1,
-    backgroundColor: "#dc2626",
+    backgroundColor: colors.dangerSurface,
     paddingVertical: 12,
     borderRadius: 8,
     alignItems: "center",
   },
   denyButtonText: {
-    color: "#ffffff",
+    color: colors.text,
     fontWeight: "600",
     fontSize: 15,
   },
   denyOptionsContainer: {
     marginTop: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#d1d5db",
+    borderTopColor: colors.border,
     paddingTop: 12,
   },
   denyOptionsTitle: {
     fontSize: 13,
-    color: "#4b5563",
+    color: colors.secondary,
     fontWeight: "600",
     marginBottom: 8,
   },
   denyOptionButton: {
-    backgroundColor: "#fee2e2",
+    backgroundColor: colors.dangerSurface,
     paddingVertical: 10,
     borderRadius: 6,
     alignItems: "center",
@@ -310,7 +311,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   cancelOptionButtonText: {
-    color: "#6b7280",
+    color: colors.secondary,
     fontSize: 14,
   },
 });

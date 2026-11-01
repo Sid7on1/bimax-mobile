@@ -1,0 +1,38 @@
+import {Buffer} from 'node:buffer';
+import {createRequire} from 'node:module';
+import {execFileSync} from 'node:child_process';
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
+import {createHash,generateKeyPairSync,sign,randomBytes} from 'node:crypto';
+import assert from 'node:assert/strict';import {jwtVerify} from 'jose';
+const require=createRequire(import.meta.url),{Miniflare,convertV4MiniflareOptions}=require('miniflare');
+const pkg=require('wrangler/package.json'),wrangler=path.resolve(path.dirname(require.resolve('wrangler/package.json')),pkg.bin.wrangler);
+const temp=fs.mkdtempSync(path.join(os.tmpdir(),'bimax-admission-'));let runtime;
+try{
+ execFileSync(process.execPath,[wrangler,'deploy','--dry-run','--outdir',temp],{cwd:path.resolve('apps/cloud-relay'),stdio:'pipe',env:{...process.env,WRANGLER_SEND_METRICS:'false'}});
+ const secret='isolated-transport-test-secret-'.repeat(2);
+ runtime=new Miniflare(convertV4MiniflareOptions({modules:true,name:'relay',script:fs.readFileSync(path.join(temp,'index.js'),'utf8'),compatibilityDate:'2026-10-01',durableObjects:{ROOM:{className:'Room',useSQLite:true}},d1Databases:{DB:'relay-test'},kvNamespaces:['GATEWAY_KEYS','GATEWAY_RATELIMIT'],bindings:{RELAY_TICKET_SECRET:secret,RELAY_PUBLIC_URL:'wss://relay.test/',RATE_LIMIT_PER_MIN:'100'}}));
+ const db=await runtime.getD1Database('DB'),kv=await runtime.getKVNamespace('GATEWAY_KEYS');
+ for(const part of fs.readFileSync('apps/gateway/schema.sql','utf8').split(/(?=^(?:CREATE|INSERT|ALTER))/m).filter(s=>/^(CREATE|INSERT|ALTER)/m.test(s)))await db.prepare(part.replace(/--[^\n]*/g,'').trim().replace(/;$/,'')).run();
+ const token='ac'.repeat(32),other='ab'.repeat(32);await kv.put(createHash('sha256').update(token).digest('hex'),'owner');await kv.put(createHash('sha256').update(other).digest('hex'),'other');
+ const key=generateKeyPairSync('ed25519'),pub=key.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64'),roomId=createHash('sha256').update(pub).digest('hex');
+ const signed=b=>({...b,signature:sign(null,Buffer.from(JSON.stringify(b)),key.privateKey).toString('base64')});
+ const registration=()=>signed({action:'register',at:Date.now(),deviceId:'desktop',helloPubkey:pub,nonce:randomBytes(16).toString('hex'),roomId});
+ const post=(route,b,bearer=token)=>runtime.dispatchFetch('https://relay.test'+route,{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+bearer},body:JSON.stringify(b)});
+ assert.equal((await post('/v1/relay-device',registration(),'invalid')).status,401);
+ const response=await post('/v1/relay-device',registration());assert.equal(response.status,200,await response.clone().text());const grant=await response.json();assert.equal(grant.relayUrl,'wss://relay.test/room/'+roomId);
+ assert.equal(await db.prepare('SELECT COUNT(*) AS n FROM entitlements').first('n'),0);
+ const renew=()=>signed({action:'renew',at:Date.now(),credential:grant.credential,deviceId:'desktop',nonce:randomBytes(16).toString('hex'),roomId});
+ const renewed=await post('/v1/relay-device/renew',renew(),grant.credential);assert.equal(renewed.status,200,await renewed.clone().text());const {ticket}=await renewed.json();assert.equal((await jwtVerify(ticket,new TextEncoder().encode(secret))).payload.roomId,roomId);
+ const phoneKey=generateKeyPairSync('ed25519'),phonePub=phoneKey.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64');
+ const phoneBody={role:'mobile',roomId,deviceId:'phone',helloPubkey:phonePub};
+ assert.equal((await post('/v1/relay-ticket',phoneBody,other)).status,403);
+ const phone=await post('/v1/relay-ticket',phoneBody);assert.equal(phone.status,200,await phone.clone().text());
+ assert.equal((await post('/v1/relay-device',registration(),other)).status,403);
+ assert.equal((await post('/v1/relay-device/renew',{...renew(),signature:'x'},grant.credential)).status,403);
+ assert.equal((await post('/v1/relay-device',{...registration(),roomId:'a'.repeat(64)})).status,403);
+ assert.equal((await post('/v1/relay-ticket',{...phoneBody,helloPubkey:pub})).status,403);
+ const revoke=signed({action:'revoke',at:Date.now(),credential:grant.credential,deviceId:'desktop',nonce:randomBytes(16).toString('hex'),roomId});assert.equal((await post('/v1/relay-device/renew',revoke,grant.credential)).status,200);
+ assert.equal((await post('/v1/relay-device/renew',renew(),grant.credential)).status,403);
+ assert.equal((await post('/v1/relay-ticket',phoneBody)).status,403);
+ console.log('PASS actual Workers/D1/KV: account admission, no model credits, Mac-key room, signed renewal, foreign account/key refusal, and revocation');
+}finally{await runtime?.dispose();fs.rmSync(temp,{recursive:true,force:true});}

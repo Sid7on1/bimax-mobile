@@ -1,5 +1,9 @@
 **Production hardening — protocol 2, updated 16 October 2026**
 
+## Current transport policy — 25 October 2026
+
+The separate `bimax-relay` Worker now performs account/device transport admission without model-credit entitlement. A fresh Mac-key proof registers a key-derived room; the saved opaque credential can only renew/revoke that room with another Mac signature. User account tokens remain on the phone. Ordinary host authorization is verified pairing/current Noise plus local Stop; native per-request consent/banner statements below are historical. Tool capabilities still need signed phone decisions and OS authentication. Selected conversation sync uses a bounded paced baseline plus pushed revisions; it is memory-only on the phone, not a durable replica. The existing production model gateway remains unchanged and its broader hardened rollout remains Target. Read record 110 and the current phone guide before applying historical deployment/consent instructions below.
+
 The repository now contains fixes and regression coverage for all three October audit rounds. See [the 16 October remediation matrix](SECURITY-REMEDIATION-2026-10-16.md) for individual findings and remaining integration requirements. Deployments must apply database migrations and supply real environment configuration before the new gateway admits traffic. Live D1 migrations 0001–0005 are now applied after backup/restore verification. Worker code and coordinated client releases remain undeployed. See [current release status](RELEASE-STATUS-2026-10-16.md).
 
 **Local verification**

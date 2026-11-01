@@ -1,3 +1,6 @@
+import {ChatDrawer} from '../components/ChatDrawer';
+import { colors } from "../lib/theme";
+import { Icon } from "../components/Icon";
 import { randomId } from "../lib/crypto/keys";
 // app/index.tsx
 import React, { useState, useCallback } from "react";
@@ -13,21 +16,17 @@ import {
 } from "react-native";
 import { useRouter, useFocusEffect } from "expo-router";
 import { listConversations, deleteConversation, type Conversation } from "../lib/chat-store";
-import { getUsage, type UsageInfo } from "../lib/gateway";
 import { supabase } from "../lib/supabase";
 
 export default function ConversationListScreen() {
   const router = useRouter();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usage, setUsage] = useState<UsageInfo | null>(null);
 
   const loadData = useCallback(async () => {
     try {
       const list = await listConversations();
       setConversations(list);
-      const u = await getUsage();
-      if (u) setUsage(u);
     } catch {
       // ignore
     } finally {
@@ -76,265 +75,143 @@ export default function ConversationListScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      {/* Top Header */}
       <View style={styles.header}>
-        <View style={styles.brandRow}>
-          <Text style={styles.brandTitle}>✦ Bimax Chat</Text>
-        </View>
-
+        <View style={{flexDirection:"row",alignItems:"center",gap:8}}><ChatDrawer/><Text style={styles.brandTitle}>Bimax</Text></View>
         <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.remoteBtn} onPress={() => router.push("/remote")}>
-            <Text style={styles.remoteBtnText}>💻 Laptop</Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Connect your Mac"
+            style={styles.iconButton}
+            onPress={() => router.push("/remote")}
+          >
+            <Icon name="monitor" />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.signOutBtn} onPress={handleSignOut}>
-            <Text style={styles.signOutText}>Sign Out</Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="New chat"
+            style={styles.iconButton}
+            onPress={handleNewChat}
+          >
+            <Icon name="edit" />
           </TouchableOpacity>
         </View>
       </View>
-
-      {/* Main List */}
       {loading ? (
-        <View style={styles.centerContainer}>
-          <ActivityIndicator size="large" color="#007aff" />
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.text} />
         </View>
       ) : conversations.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <Text style={styles.emptyIcon}>💬</Text>
-          <Text style={styles.emptyTitle}>No Conversations Yet</Text>
-          <Text style={styles.emptySubtitle}>
-            Start a new conversation powered by DeepSeek and Qwen.
-          </Text>
-          <TouchableOpacity style={styles.newChatButton} onPress={handleNewChat}>
-            <Text style={styles.newChatButtonText}>+ Start New Chat</Text>
+        <View style={styles.center}>
+          <Text style={styles.emptyTitle}>How can I help?</Text>
+          <Text style={styles.subtitle}>A fresh space for your next idea.</Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            style={styles.newChat}
+            onPress={handleNewChat}
+          >
+            <Text style={styles.newChatText}>Start a conversation</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityRole="button"
+            style={styles.connect}
+            onPress={() => router.push("/remote")}
+          >
+            <Text style={styles.subtitle}>Connect your Mac</Text>
           </TouchableOpacity>
         </View>
       ) : (
         <FlatList
           data={conversations}
           keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.listContent}
+          contentContainerStyle={styles.list}
+          ListHeaderComponent={<Text style={styles.label}>Your chats</Text>}
           renderItem={({ item }) => (
-            <TouchableOpacity
-              style={styles.itemCard}
-              onPress={() => router.push(`/chat/${item.id}`)}
-              activeOpacity={0.7}
-            >
-              <View style={styles.itemMain}>
-                <Text numberOfLines={1} style={styles.itemTitle}>
-                  {item.title || "New Conversation"}
-                </Text>
-                <View style={styles.metaRow}>
-                  <Text style={styles.modelTag}>{item.model}</Text>
-                  <Text style={styles.dateText}>
-                    {new Date(item.updated_at).toLocaleDateString([], {
-                      month: "short",
-                      day: "numeric",
-                    })}
-                  </Text>
-                </View>
-              </View>
-
+            <View style={styles.row}>
               <TouchableOpacity
-                onPress={() => handleDelete(item.id, item.title)}
-                style={styles.deleteButton}
+                accessibilityRole="button"
+                style={styles.conversation}
+                onPress={() => router.push(`/chat/${item.id}`)}
               >
-                <Text style={styles.deleteIcon}>✕</Text>
+                <Text numberOfLines={1} style={styles.itemTitle}>
+                  {item.title || "New conversation"}
+                </Text>
+                <Text style={styles.date}>
+                  {new Date(item.updated_at).toLocaleDateString([], {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </Text>
               </TouchableOpacity>
-            </TouchableOpacity>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel={`Delete ${item.title}`}
+                style={styles.iconButton}
+                onPress={() => handleDelete(item.id, item.title)}
+              >
+                <Icon name="close" size={16} color={colors.muted} />
+              </TouchableOpacity>
+            </View>
           )}
         />
       )}
-
-      {/* Floating Action Button (New Chat) */}
-      {conversations.length > 0 && (
-        <TouchableOpacity style={styles.fab} onPress={handleNewChat} activeOpacity={0.8}>
-          <Text style={styles.fabText}>✎ New Chat</Text>
+      <View style={styles.footer}>
+        <TouchableOpacity accessibilityRole="button" onPress={handleSignOut} style={styles.signOut}>
+          <Text style={styles.footerText}>Sign out</Text>
         </TouchableOpacity>
-      )}
 
-      {/* Usage Footer */}
-      {usage && (
-        <View style={styles.usageFooter}>
-          <Text style={styles.usageText}>
-            Monthly Tokens: {usage.tokensUsed.toLocaleString()} /{" "}
-            {usage.tokenBudget.toLocaleString()} (
-            {Math.round((usage.tokensUsed / usage.tokenBudget) * 100)}%) • Resets{" "}
-            {new Date(usage.resetAt).toLocaleDateString([], { month: "short", day: "numeric" })}
-          </Text>
-        </View>
-      )}
+      </View>
     </SafeAreaView>
   );
 }
-
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: "#ffffff",
-  },
+  safeArea: { flex: 1, backgroundColor: colors.background },
   header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#e5e5ea",
-  },
-  brandRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  brandTitle: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#000000",
-    letterSpacing: -0.3,
-  },
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  remoteBtn: {
-    backgroundColor: "#f2f2f7",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 8,
-  },
-  remoteBtnText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#3a3a3c",
-  },
-  signOutBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-  },
-  signOutText: {
-    fontSize: 13,
-    color: "#ff3b30",
-    fontWeight: "500",
-  },
-  centerContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: 32,
-  },
-  emptyIcon: {
-    fontSize: 48,
-    marginBottom: 16,
-  },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: "#1c1c1e",
-    marginBottom: 6,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: "#8e8e93",
-    textAlign: "center",
-    marginBottom: 24,
-    lineHeight: 20,
-  },
-  newChatButton: {
-    backgroundColor: "#007aff",
     paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 14,
+    paddingVertical: 8,
   },
-  newChatButtonText: {
-    fontSize: 15,
+  brandTitle: { fontSize: 23, fontWeight: "600", color: colors.text, letterSpacing: -0.7 },
+  headerActions: { flexDirection: "row", gap: 8 },
+  iconButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", padding: 28 },
+  emptyTitle: {
+    fontSize: 29,
     fontWeight: "600",
-    color: "#ffffff",
+    color: colors.text,
+    letterSpacing: -0.8,
+    textAlign: "center",
   },
-  listContent: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 80,
+  subtitle: {
+    color: colors.secondary,
+    fontSize: 15,
+    lineHeight: 23,
+    textAlign: "center",
+    marginTop: 10,
   },
-  itemCard: {
+  newChat: {
+    marginTop: 30,
+    backgroundColor: colors.button,
+    borderRadius: 28,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+  },
+  newChatText: { color: colors.buttonText, fontSize: 16, fontWeight: "600" },
+  connect: { padding: 12, marginTop: 10 },
+  list: { padding: 16 },
+  label: { fontSize: 13, color: colors.muted, margin: 12 },
+  row: { flexDirection: "row", alignItems: "center", borderRadius: 14, marginVertical: 2 },
+  conversation: { flex: 1, padding: 14 },
+  itemTitle: { fontSize: 17, color: colors.text, marginBottom: 6 },
+  date: { fontSize: 12, color: colors.muted },
+  footer: {
+    paddingHorizontal: 20,
+    paddingBottom: 10,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#f9f9fb",
-    borderRadius: 14,
-    padding: 14,
-    marginVertical: 4,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#e5e5ea",
   },
-  itemMain: {
-    flex: 1,
-    marginRight: 10,
-  },
-  itemTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#1c1c1e",
-    marginBottom: 4,
-  },
-  metaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  modelTag: {
-    fontSize: 11,
-    color: "#007aff",
-    backgroundColor: "#e5f1ff",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-    fontWeight: "500",
-  },
-  dateText: {
-    fontSize: 12,
-    color: "#8e8e93",
-  },
-  deleteButton: {
-    padding: 6,
-  },
-  deleteIcon: {
-    fontSize: 14,
-    color: "#c7c7cc",
-  },
-  fab: {
-    position: "absolute",
-    bottom: 40,
-    right: 20,
-    backgroundColor: "#007aff",
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderRadius: 24,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  fabText: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: "#ffffff",
-  },
-  usageFooter: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#e5e5ea",
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    backgroundColor: "#f9f9fb",
-  },
-  usageText: {
-    fontSize: 11,
-    color: "#636366",
-    textAlign: "center",
-  },
+  signOut: { minHeight: 44, justifyContent: "center" },
+  footerText: { color: colors.muted, fontSize: 12 },
 });

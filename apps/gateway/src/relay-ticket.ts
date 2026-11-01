@@ -1,6 +1,24 @@
 import { SignJWT } from "jose";
 import type { Env } from "./auth";
-export async function mintRelayTicket(
+/** Legacy inference-gateway admission retains its entitlement policy. */
+export async function mintRelayTicket(env: Env,userId: string,body: Record<string,unknown>): Promise<string> {
+  const entitlement = await env.DB.prepare(
+    "SELECT status,expires_at FROM entitlements WHERE user_id=?",
+  )
+    .bind(userId)
+    .first<{ status: string; expires_at: string }>();
+  if (
+    !entitlement ||
+    entitlement.status !== "active" ||
+    !Number.isFinite(Date.parse(entitlement.expires_at)) ||
+    Date.parse(entitlement.expires_at) <= Date.now()
+  )
+    throw new Error("No active entitlement");
+  return mintTransportTicket(env,userId,body);
+}
+
+/** Relay transport is account/device authority; it does not consume or grant model credits. */
+export async function mintTransportTicket(
   env: Env,
   userId: string,
   body: Record<string, unknown>,
@@ -18,18 +36,6 @@ export async function mintRelayTicket(
     throw new Error("Invalid room identity");
   if (!env.RELAY_TICKET_SECRET || env.RELAY_TICKET_SECRET.length < 32)
     throw new Error("Relay admission is not configured");
-  const entitlement = await env.DB.prepare(
-    "SELECT status,expires_at FROM entitlements WHERE user_id=?",
-  )
-    .bind(userId)
-    .first<{ status: string; expires_at: string }>();
-  if (
-    !entitlement ||
-    entitlement.status !== "active" ||
-    !Number.isFinite(Date.parse(entitlement.expires_at)) ||
-    Date.parse(entitlement.expires_at) <= Date.now()
-  )
-    throw new Error("No active entitlement");
   if (role === "desktop" && roomId === deviceId)
     await env.DB.prepare(
       "INSERT OR IGNORE INTO relay_rooms(room_id,user_id,updated_at) SELECT ?1,?2,?3 WHERE (SELECT COUNT(*) FROM relay_rooms WHERE user_id=?2)<5",

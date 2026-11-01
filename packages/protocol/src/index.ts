@@ -62,6 +62,14 @@ export type MessageKind =
   | "delivery_ack"
   | "encrypted"
   | "agent_status"
+  | "cloud_setup"
+  | "session_watch"
+  | "session_watch_status"
+  | "session_update"
+  | "session_history_request"
+  | "session_history_chunk"
+  | "session_create_request"
+  | "session_create_result"
   | "session_list_request"
   | "command_request"
   | "command_result"
@@ -115,11 +123,18 @@ export interface AgentSessionInfo {
   title: string;
   status: AgentState;
   startedAt: number;
+  workspace?: MacWorkspace;
 }
 
+export interface MacWorkspace { id: string; name: string; location: string }
 export interface SessionList {
   sessions: AgentSessionInfo[];
+  workspaces?: MacWorkspace[];
+  canCreateSessions?: boolean;
 }
+export interface SessionCreateRequest { requestId: string; workspaceId: string; sentAt: number }
+export interface SessionCreateResult { requestId: string; workspaceId: string; ok: boolean; sessionId?: string; error?: string }
+
 
 export interface CommandRequest {
   instruction: string;
@@ -390,3 +405,37 @@ export interface PairingIdentityProof {
   desktopPublicKey: string;
   signature: string;
 }
+
+/** Read-only, paged over authenticated Noise. Never raw on the relay. */
+export interface SessionHistoryRequest { requestId: string; sessionId: string; cursor?: string; watchId?: string }
+export interface RemoteMessage {
+  id: string; role: "user" | "assistant" | "system" | "tool";
+  content: string; reasoning?: string; at?: number; status?: string;
+}
+export interface RemoteConversation {
+  sessionId: string; title: string; status: AgentState; messages: RemoteMessage[];
+  streaming: string; thinking: string; updatedAt: number; revision?: number;
+}
+export interface SessionHistoryChunk {
+  requestId: string; sessionId: string; ok: boolean; error?: string;
+  snapshotId?: string; offset?: number; totalBytes?: number; data?: string; nextCursor?: string;
+}
+
+/** Live selected-conversation transport. Revisions bind patches to an acknowledged snapshot. */
+export interface SessionWatchRequest {
+  watchId: string; sessionId: string; action: "start" | "ready" | "stop"; revision?: number;
+}
+export interface SessionWatchStatus { watchId: string; sessionId: string; ok: boolean; error?: string }
+export interface ConversationPatch {
+  title: string; status: AgentState; updatedAt: number;
+  streaming?: { append: string } | { set: string };
+  thinking?: { append: string } | { set: string };
+  messages?: { from: number; values: RemoteMessage[] };
+}
+export interface SessionUpdate {
+  watchId: string; sessionId: string; baseRevision: number; revision: number;
+  patch?: ConversationPatch; resync?: boolean;
+}
+
+export interface CloudRelayGrant {action:'grant';deviceId:string;relayUrl:string;credential:string}
+export interface CloudRelayRegistration {action:'register';at:number;deviceId:string;helloPubkey:string;nonce:string;roomId:string;signature:string}

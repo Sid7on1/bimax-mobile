@@ -1,0 +1,21 @@
+import {describe,it,expect} from 'vitest';
+import {generateKeyPairSync,sign,randomBytes,createHash} from 'node:crypto';
+import {jwtVerify} from 'jose';
+import {registerRelayDevice,renewRelayDevice} from '../../cloud-relay/src/device-admission';
+import {removeRelayRoom} from '../src/relay-ticket';
+import {verifyAuth} from '../src/auth';
+import {createTestEnv} from './mocks';
+const keys=generateKeyPairSync('ed25519'),wrong=generateKeyPairSync('ed25519');
+const pub=keys.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64');
+const roomId=createHash('sha256').update(pub).digest('hex');
+const registration=()=>{const b={action:'register',at:Date.now(),deviceId:'desktop',helloPubkey:pub,nonce:randomBytes(16).toString('hex'),roomId};return {...b,signature:sign(null,Buffer.from(JSON.stringify(b)),keys.privateKey).toString('base64')};};
+const setup=()=>{const value=createTestEnv({RELAY_TICKET_SECRET:'relay-only-secret-'.repeat(3),RELAY_PUBLIC_URL:'wss://relay.test/'});value.mockD1.provision('owner');return value;};
+const proof=(credential:string,key=keys.privateKey,action='renew',at=Date.now())=>{const b={action,at,credential,deviceId:'desktop',nonce:randomBytes(16).toString('hex'),roomId};return {...b,signature:sign(null,Buffer.from(JSON.stringify(b)),key).toString('base64')};};
+describe('paired-device cloud renewal',()=>{
+ it('mints only a relay-scoped credential and a 60-second device-bound ticket',async()=>{const {env}=setup();const grant=await registerRelayDevice(env,'owner',registration());expect(grant.credential).toMatch(/^rd_/);const renewed=await renewRelayDevice(env,grant.credential,proof(grant.credential));const ticket=(await jwtVerify(renewed.ticket!,new TextEncoder().encode(env.RELAY_TICKET_SECRET),{audience:'bimax-relay'})).payload;expect(ticket.role).toBe('desktop');expect(ticket.helloPubkey).toBe(pub);expect(ticket.exp!-ticket.iat!).toBe(60);expect(await verifyAuth(new Request('https://gateway.test/v1/chat/completions',{headers:{Authorization:'Bearer '+grant.credential}}),env)).toBe(null);});
+ it('refuses a stolen credential without the device key and stale or changed proofs',async()=>{const {env}=setup();const grant=await registerRelayDevice(env,'owner',registration());await expect(renewRelayDevice(env,grant.credential,proof(grant.credential,wrong.privateKey))).rejects.toThrow();await expect(renewRelayDevice(env,grant.credential,proof(grant.credential,keys.privateKey,'renew',Date.now()-61000))).rejects.toThrow();await expect(renewRelayDevice(env,grant.credential,{...proof(grant.credential),action:'revoke'})).rejects.toThrow();});
+ it('cannot revive a removed grant after the same room is registered again',async()=>{const {env}=setup();const first=await registerRelayDevice(env,'owner',registration());await removeRelayRoom(env,'owner',roomId);const second=await registerRelayDevice(env,'owner',registration());await expect(renewRelayDevice(env,first.credential,proof(first.credential))).rejects.toThrow(/revoked/);expect((await renewRelayDevice(env,second.credential,proof(second.credential))).ticket).toBeTruthy();});
+ it('keeps concurrent legitimate registrations on one current grant',async()=>{const {env}=setup();const grants=await Promise.all(Array.from({length:4},()=>registerRelayDevice(env,'owner',registration())));for(const g of grants)expect((await renewRelayDevice(env,g.credential,proof(g.credential))).ticket).toBeTruthy();});
+ it('rejects other account ownership while transport remains independent of model-credit allocation',async()=>{const {env,mockD1}=setup();mockD1.provision('other');const grant=await registerRelayDevice(env,'owner',registration());await expect(registerRelayDevice(env,'other',registration())).rejects.toThrow(/owned/);mockD1.sqlite.prepare("UPDATE entitlements SET status='suspended' WHERE user_id='owner'").run();expect((await renewRelayDevice(env,grant.credential,proof(grant.credential))).ticket).toBeTruthy();});
+ it('a device can revoke only its own proof-bound room',async()=>{const {env}=setup();const grant=await registerRelayDevice(env,'owner',registration());expect(await renewRelayDevice(env,grant.credential,proof(grant.credential,keys.privateKey,'revoke'))).toEqual({revoked:true});await expect(renewRelayDevice(env,grant.credential,proof(grant.credential))).rejects.toThrow(/revoked/);});
+});

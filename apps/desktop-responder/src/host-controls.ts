@@ -1,12 +1,12 @@
 export interface RemoteOperation {
-  kind: "command" | "chat" | "file";
+  kind: "command" | "chat" | "file" | "history";
   peer: string;
   text: string;
 }
 
-/** Implement in the desktop host using a visible session banner and a local confirmation UI.
- * The banner must expose Responder.emergencyStop(), including when the network is unavailable.
- * Authorization is a host decision, never a model-generated decision or a shell blocklist.
+/** Main-owned trusted-pair policy and a visible connection indicator with local emergency Stop.
+ * Pairing grants ordinary remote work; reconnecting the same pinned phone must not need a Mac prompt.
+ * Authorization stays a host decision, never model text. Tool decisions retain their signed phone gate.
  */
 export interface HostControls {
   setRemoteSessionActive(active: boolean, peer?: string): Promise<void>;

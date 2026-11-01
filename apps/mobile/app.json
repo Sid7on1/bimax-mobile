@@ -6,23 +6,19 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "bimax",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
+    "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.bimax.mobile"
+      "bundleIdentifier": "com.bimax.mobile",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Bimax connects to your Mac on the same private network when you pair and use Remote."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#1a1a1a"
       },
-      "edgeToEdgeEnabled": true,
       "package": "com.bimax.mobile"
     },
     "web": {
@@ -38,6 +34,14 @@
         "expo-local-authentication",
         {
           "faceIDPermission": "Allow Bimax to confirm tool approvals with Face ID."
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#1a1a1a"
         }
       ]
     ]

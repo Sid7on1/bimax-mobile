@@ -14,3 +14,21 @@ new_sqlite_classes = ["Room"]
 enabled = true
 head_sampling_rate = 0.1
 redact_query_string = true
+
+[vars]
+SUPABASE_URL = "https://udnlmfluydavkavqjbto.supabase.co"
+RELAY_PUBLIC_URL = "wss://bimax-relay.sid7vish.workers.dev/"
+RATE_LIMIT_PER_MIN = "30"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bimax_gateway"
+database_id = "3e796b83-dcd6-4751-b163-e672fc06c7cc"
+
+[[kv_namespaces]]
+binding = "GATEWAY_KEYS"
+id = "93b10ad93c334b1f8952ebcdb0456e9d"
+
+[[kv_namespaces]]
+binding = "GATEWAY_RATELIMIT"
+id = "ce5e0f8bb2cf469f98333e561c860dea"

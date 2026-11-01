@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import assert from "node:assert";
+import { Buffer } from "node:buffer";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../../..");
@@ -15,7 +16,13 @@ const WebSocket = require("ws");
 const { ed25519 } = require("@noble/curves/ed25519.js");
 const { sha256 } = require("@noble/hashes/sha2.js");
 
-const PORT = 18796;
+let PORT;
+const passedCases = new Set();
+function recordCase(id) {
+  assert.ok(!passedCases.has(id), `duplicate integration case ${id}`);
+  passedCases.add(id);
+  console.log(`CASE ${id}: PASS`);
+}
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bimax-responder-test-"));
 const dbPath = path.join(tmpDir, "relay.db");
 const mobileDistDir = path.join(tmpDir, "mobile-dist");
@@ -82,25 +89,67 @@ async function waitForHealth(timeoutMs = 10000) {
 }
 
 function startRelay() {
-  relayProc = spawn("node", ["apps/relay/dist/index.js"], {
+  relayProc = spawn(process.execPath, ["apps/relay/dist/index.js"], {
     cwd: repoRoot,
     env: {
       ...process.env,
-      PORT: String(PORT),
+      PORT: "0",
+      RELAY_HOST: "127.0.0.1",
+      RELAY_ADMISSION_TOKEN: "",
       DB_PATH: dbPath,
     },
-    stdio: "pipe",
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   relayProc.stdout.on("data", (d) => process.stdout.write(`[RELAY] ${d}`));
   relayProc.stderr.on("data", (d) => process.stderr.write(`[RELAY ERR] ${d}`));
-  return relayProc;
+  return new Promise((resolve, reject) => {
+    const child = relayProc;
+    const timer = setTimeout(
+      () => finish(new Error("Relay did not report its listening socket")),
+      10000,
+    );
+    function finish(error, port) {
+      clearTimeout(timer);
+      child.off("message", onMessage);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      if (error) reject(error);
+      else {
+        PORT = port;
+        resolve();
+      }
+    }
+    function onMessage(message) {
+      if (
+        message?.type === "relay-listening" &&
+        Number.isInteger(message.port) &&
+        message.port > 0 &&
+        message.port <= 65535
+      )
+        finish(null, message.port);
+    }
+    function onError(error) {
+      finish(error);
+    }
+    function onExit(code, signal) {
+      finish(new Error(`Relay exited before listening (${code ?? signal})`));
+    }
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
 }
 
 function waitForStatus(client, targetStatus, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     if (client.status === targetStatus) return resolve();
     const timer = setTimeout(
-      () => reject(new Error(`Timeout waiting for client status ${targetStatus} (current: ${client.status})`)),
+      () =>
+        reject(
+          new Error(
+            `Timeout waiting for client status ${targetStatus} (current: ${client.status})`,
+          ),
+        ),
       timeoutMs,
     );
     const prev = client.opts.onStatus;
@@ -126,7 +175,7 @@ async function main() {
   // 1. Compile apps/relay and start it
   console.log("Building apps/relay...");
   execSync("npx tsc -p apps/relay/tsconfig.json", { cwd: repoRoot, stdio: "inherit" });
-  startRelay();
+  await startRelay();
   await waitForHealth();
   console.log("Relay running on port", PORT);
 
@@ -150,39 +199,35 @@ async function main() {
   const { createIdentity } = require(path.join(desktopDistDir, "identity.js"));
 
   const { RelayClient } = require(path.join(mobileDistDir, "relay", "client.js"));
-  const {
-    PairingManager: PhonePairingManager,
-    formatVerificationCode,
-  } = require(path.join(mobileDistDir, "session", "session.js"));
-  const {
-    seal: mobileSeal,
-    open: mobileOpen,
-    newE2EState: mobileNewE2EState,
-  } = require(path.join(mobileDistDir, "e2e", "framing.js"));
-  const {
-    generateX25519Keypair,
-    generateEd25519Keypair,
-  } = require(path.join(mobileDistDir, "crypto/keys.js"));
-  const {
-    bytesToBase64,
-    base64ToBytes,
-  } = require(path.join(mobileDistDir, "crypto/base64.js"));
-  const {
-    NoiseIKInitiator,
-  } = require(path.join(mobileDistDir, "crypto/noise.js"));
-  const {
-    buildApprovalDecision,
-    signApprovalDecision,
-  } = require(path.join(mobileDistDir, "approvals/approvals.js"));
+  const { PairingManager: PhonePairingManager, formatVerificationCode } = require(
+    path.join(mobileDistDir, "session", "session.js"),
+  );
+  const { seal: mobileSeal, open: mobileOpen, newE2EState: mobileNewE2EState } = require(
+    path.join(mobileDistDir, "e2e", "framing.js"),
+  );
+  const { generateX25519Keypair, generateEd25519Keypair } = require(
+    path.join(mobileDistDir, "crypto/keys.js"),
+  );
+  const { bytesToBase64, base64ToBytes } = require(path.join(mobileDistDir, "crypto/base64.js"));
+  const { NoiseIKInitiator } = require(path.join(mobileDistDir, "crypto/noise.js"));
+  const { buildApprovalDecision, signApprovalDecision } = require(
+    path.join(mobileDistDir, "approvals/approvals.js"),
+  );
 
   const relayUrl = `ws://127.0.0.1:${PORT}`;
 
   // Initialize Desktop Responder & FakeEngine
   const fakeEngine = new FakeEngine();
+  let historyReads = 0,historyRevision=1,macStreaming="";
+  let changed;fakeEngine.onSessionChanged=callback=>{changed=callback;return()=>{changed=null;};};
+  fakeEngine.getSessionHistory = async (sessionId) => {
+    historyReads++;
+    return { sessionId, title: 'Selected history', status: 'idle', messages: [{id:'exact',role:'assistant',content:'α **exact** '.repeat(6000)}], streaming:macStreaming,thinking:'',updatedAt:1,revision:historyRevision };
+  };
   const desktopIdentity = createIdentity("desktop-dev-1");
   const responder = new Responder({
     identity: desktopIdentity,
-    hostControls:{setRemoteSessionActive:async()=>{},authorize:async()=>true},
+    hostControls: { setRemoteSessionActive: async () => {}, authorize: async () => true },
     enginePort: fakeEngine,
     relayUrl,
     dataDir: path.join(tmpDir, "responder-data"),
@@ -321,10 +366,25 @@ async function main() {
     helloKeypair: phoneEd25519,
   });
 
-  const { canonicalJson } = require(path.join(mobileDistDir,"crypto","keys.js"));
+  const { canonicalJson } = require(path.join(mobileDistDir, "crypto", "keys.js"));
   function pairingPayload(ref, advert) {
-    const proof={pairingVersion:2,sentAt:Date.now(),mobileDeviceId:phoneDeviceId,ref,helloPubkey:bytesToBase64(phoneEd25519.publicKey),noisePublicKey:bytesToBase64(phoneX25519.publicKey),desktopPublicKey:advert.desktopPublicKey};
-    return new TextEncoder().encode(canonicalJson({...proof,signature:bytesToBase64(ed25519.sign(new TextEncoder().encode(canonicalJson(proof)),phoneEd25519.privateKey))}));
+    const proof = {
+      pairingVersion: 2,
+      sentAt: Date.now(),
+      mobileDeviceId: phoneDeviceId,
+      ref,
+      helloPubkey: bytesToBase64(phoneEd25519.publicKey),
+      noisePublicKey: bytesToBase64(phoneX25519.publicKey),
+      desktopPublicKey: advert.desktopPublicKey,
+    };
+    return new TextEncoder().encode(
+      canonicalJson({
+        ...proof,
+        signature: bytesToBase64(
+          ed25519.sign(new TextEncoder().encode(canonicalJson(proof)), phoneEd25519.privateKey),
+        ),
+      }),
+    );
   }
   function sendPhoneEncrypted(innerKind, body) {
     assert.ok(phoneSession, "phoneSession must be established");
@@ -352,12 +412,24 @@ async function main() {
   }
 
   async function rehandshakeAfterFailure() {
-    const manager = new PhonePairingManager({ deviceId: phoneDeviceId, staticKeypair: phoneX25519, helloKeypair: phoneEd25519 });
-    const request = manager.beginPairing({ ...responder.pairingManager.getAdvertisement(), ref: "rehandshake" });
+    const manager = new PhonePairingManager({
+      deviceId: phoneDeviceId,
+      staticKeypair: phoneX25519,
+      helloKeypair: phoneEd25519,
+    });
+    const request = manager.beginPairing({
+      ...responder.pairingManager.getAdvertisement(),
+      ref: "rehandshake",
+    });
     phoneRelayClient.send(request);
     const grant = await waitForMessage((m) => m.kind === "pairing_grant");
     phoneSession = manager.handleGrant(grant);
-    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    phoneRelayClient.send(
+      require("@bimax/core/session/lifecycle").buildTransportConfirmation(
+        phoneSession,
+        phoneDeviceId,
+      ),
+    );
     await new Promise((resolve) => setTimeout(resolve, 100));
     phoneE2EState = mobileNewE2EState();
   }
@@ -373,7 +445,12 @@ async function main() {
 
     const grantEnv = await waitForMessage((m) => m.kind === "pairing_grant");
     phoneSession = phonePairingManager.handleGrant(grantEnv);
-    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    phoneRelayClient.send(
+      require("@bimax/core/session/lifecycle").buildTransportConfirmation(
+        phoneSession,
+        phoneDeviceId,
+      ),
+    );
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const candidate = responder.pairingManager.getCandidatePairing();
@@ -383,14 +460,12 @@ async function main() {
     const desktopCode = candidate.verificationCode;
     assert.strictEqual(phoneCode, desktopCode, "Verification codes must match on both sides");
 
-    const trustedRecord = await responder.confirmTrustedPhone(
-      desktopCode,
-    );
+    const trustedRecord = await responder.confirmTrustedPhone(desktopCode);
     assert.strictEqual(trustedRecord.phoneDeviceId, phoneDeviceId);
     assert.strictEqual(trustedRecord.phoneHelloPubkeyB64, bytesToBase64(phoneEd25519.publicKey));
 
     phoneE2EState = mobileNewE2EState();
-    console.log("CASE 1: PASS");
+    recordCase(1);
   } catch (err) {
     console.error("CASE 1: FAIL", err);
     process.exit(1);
@@ -409,7 +484,7 @@ async function main() {
       staticKeypair: phoneX25519,
       remoteStaticPublicKey: base64ToBytes(advert.desktopPublicKey),
     });
-    const msg1 = initiator.writeMessage1(pairingPayload("skip-ref-rehandshake",advert));
+    const msg1 = initiator.writeMessage1(pairingPayload("skip-ref-rehandshake", advert));
 
     const rehandshakeReq = {
       v: 2,
@@ -438,7 +513,12 @@ async function main() {
       decrypt: (ct) => initiator.decrypt(ct),
     };
 
-    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(newPhoneSession, phoneDeviceId));
+    phoneRelayClient.send(
+      require("@bimax/core/session/lifecycle").buildTransportConfirmation(
+        newPhoneSession,
+        phoneDeviceId,
+      ),
+    );
     await new Promise((resolve) => setTimeout(resolve, 100));
     // Both sides reset E2E state
     phoneSession = newPhoneSession;
@@ -487,7 +567,43 @@ async function main() {
     sendPhoneEncrypted("session_list_request", {});
     const listRes = await promiseList;
     assert.strictEqual(listRes.innerKind, "session_list");
-    console.log("CASE 2: PASS");
+    // Selected history travels only as authenticated encrypted chunks, beneath Noise's frame limit.
+    const historyParts = [];
+    let cursor;
+    do {
+      const response = waitForDecrypted((k,b) => k === 'session_history_chunk' && b.requestId === 'history-integration');
+      sendPhoneEncrypted('session_history_request', {requestId:'history-integration',sessionId:'session-fake-1',cursor});
+      const chunk = (await response).body;
+      assert.strictEqual(chunk.ok, true);
+      assert.strictEqual(chunk.sessionId, 'session-fake-1');
+      assert.strictEqual(chunk.offset, historyParts.reduce((n,b)=>n+b.length,0));
+      const bytes = Buffer.from(chunk.data,'base64');
+      assert.ok(bytes.length <= 16384);
+      historyParts.push(bytes); cursor=chunk.nextCursor;
+    } while (cursor);
+    const history = JSON.parse(Buffer.concat(historyParts).toString());
+    assert.strictEqual(history.messages[0].content, 'α **exact** '.repeat(6000));
+    assert.strictEqual(historyReads,1);
+    console.log('Encrypted selected history multi-chunk roundtrip: PASS');
+    await new Promise(r=>setTimeout(r,1100));
+    sendPhoneEncrypted('session_watch',{watchId:'integration-watch',sessionId:'session-fake-1',action:'start'});
+    const watchAck=await waitForDecrypted(k=>k==='session_watch_status');assert.strictEqual(watchAck.body.ok,true);console.log('Live watch acknowledged');
+    let baselineCursor;do{
+      await new Promise(r=>setTimeout(r,125));
+      sendPhoneEncrypted('session_history_request',{requestId:'live-baseline',sessionId:'session-fake-1',watchId:'integration-watch',cursor:baselineCursor});
+      const frame=await waitForDecrypted((k,b)=>k==='session_history_chunk'&&b.requestId==='live-baseline');assert.strictEqual(frame.body.ok,true);baselineCursor=frame.body.nextCursor;
+    }while(baselineCursor);
+    sendPhoneEncrypted('session_watch',{watchId:'integration-watch',sessionId:'session-fake-1',action:'ready',revision:historyRevision});
+    const readyAck=await waitForDecrypted(k=>k==='session_watch_status');assert.strictEqual(readyAck.body.ok,true);
+    const readyDeadline=Date.now()+2500;while(historyReads!==3&&Date.now()<readyDeadline)await new Promise(r=>setTimeout(r,10));assert.strictEqual(historyReads,3,'ready must establish its initial exact observation before the fixture changes the Mac');
+    historyRevision++;macStreaming='A response started on the Mac';changed('session-fake-1');
+    const liveFrame=await waitForDecrypted(k=>k==='session_update');assert.strictEqual(liveFrame.body.patch.streaming.append,macStreaming);assert.strictEqual(liveFrame.body.baseRevision,1);assert.strictEqual(historyReads,4);
+    sendPhoneEncrypted('session_watch',{watchId:'integration-watch',sessionId:'session-fake-1',action:'stop'});
+    console.log('Encrypted Mac-origin live patch without history polling: PASS');
+
+    // Let this extra bounded transfer leave the relay rate window before later burst tests.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    recordCase(2);
   } catch (err) {
     console.error("CASE 2: FAIL", err);
     process.exit(1);
@@ -568,7 +684,7 @@ async function main() {
     assert.throws(() => sessionBeforeOldSeq.encrypt(new Uint8Array()));
     await rehandshakeAfterFailure();
 
-    console.log("CASE 3: PASS");
+    recordCase(3);
   } catch (err) {
     console.error("CASE 3: FAIL", err);
     process.exit(1);
@@ -616,7 +732,14 @@ async function main() {
     const doneRes2 = await promiseDone2;
     assert.strictEqual(doneRes2.body.sessionId, "session-chat-1");
 
-    console.log("CASE 4: PASS");
+    const workspace={id:'w-'+'a'.repeat(64),name:'Fixture project',location:'~/fixture'};
+    let created=0;fakeEngine.listWorkspaces=async()=>[workspace];fakeEngine.createSession=async id=>{assert.strictEqual(id,workspace.id);created++;return{sessionId:'new-workspace-chat'};};
+    sendPhoneEncrypted('session_list_request',{});const catalog=await waitForDecrypted((kind,body)=>kind==='session_list'&&body.canCreateSessions===true);assert.deepStrictEqual(catalog.body.workspaces,[workspace]);
+    const intent={requestId:'create-'+'a'.repeat(32),workspaceId:workspace.id,sentAt:Date.now()};
+    sendPhoneEncrypted('session_create_request',intent);const first=await waitForDecrypted(kind=>kind==='session_create_result');assert.strictEqual(first.body.ok,true);assert.strictEqual(first.body.sessionId,'new-workspace-chat');
+    sendPhoneEncrypted('session_create_request',intent);const retry=await waitForDecrypted(kind=>kind==='session_create_result');assert.strictEqual(retry.body.sessionId,first.body.sessionId);assert.strictEqual(created,1);
+    console.log('Encrypted workspace catalogue and idempotent new Mac conversation: PASS');
+    recordCase(4);
   } catch (err) {
     console.error("CASE 4: FAIL", err);
     process.exit(1);
@@ -638,7 +761,9 @@ async function main() {
       expiresAt: Date.now() + 60000,
     };
 
-    const waitApprReq = waitForDecrypted((k, body) => k === "approval_request" && body.approvalId === "appr-v16-happy");
+    const waitApprReq = waitForDecrypted(
+      (k, body) => k === "approval_request" && body.approvalId === "appr-v16-happy",
+    );
     fakeEngine.emitApproval(approvalReq);
     const recvReq = await waitApprReq;
 
@@ -663,7 +788,9 @@ async function main() {
       expiresAt: Date.now() + 60000,
     };
 
-    const waitSwapReq = waitForDecrypted((k, body) => k === "approval_request" && body.approvalId === "appr-swap-attack");
+    const waitSwapReq = waitForDecrypted(
+      (k, body) => k === "approval_request" && body.approvalId === "appr-swap-attack",
+    );
     fakeEngine.emitApproval(attackReq);
     await waitSwapReq;
 
@@ -678,7 +805,11 @@ async function main() {
     await new Promise((r) => setTimeout(r, 200));
 
     const attackRes = fakeEngine.resolutions.find((r) => r.approvalId === "appr-swap-attack");
-    assert.strictEqual(attackRes, undefined, "Swapped requestHash must be rejected and engine never told");
+    assert.strictEqual(
+      attackRes,
+      undefined,
+      "Swapped requestHash must be rejected and engine never told",
+    );
 
     // 3. Attack case B: Decision with bad signature -> rejected
     const badSigDec = {
@@ -695,9 +826,13 @@ async function main() {
     await new Promise((r) => setTimeout(r, 200));
 
     const badSigRes = fakeEngine.resolutions.find((r) => r.approvalId === "appr-bad-sig");
-    assert.strictEqual(badSigRes, undefined, "Bad signature decision must be rejected and engine never told");
+    assert.strictEqual(
+      badSigRes,
+      undefined,
+      "Bad signature decision must be rejected and engine never told",
+    );
 
-    console.log("CASE 5: PASS");
+    recordCase(5);
   } catch (err) {
     console.error("CASE 5: FAIL", err);
     process.exit(1);
@@ -747,7 +882,7 @@ async function main() {
       "Engine must execute exactly once under same idempotencyKey",
     );
 
-    console.log("CASE 6: PASS");
+    recordCase(6);
   } catch (err) {
     console.error("CASE 6: FAIL", err);
     process.exit(1);
@@ -783,7 +918,9 @@ async function main() {
     await new Promise((r) => setTimeout(r, 100));
 
     // Send kill_request
-    const waitKill = waitForDecrypted((k, b) => k === "kill_result" && b.idempotencyKey === "kill-req-1");
+    const waitKill = waitForDecrypted(
+      (k, b) => k === "kill_result" && b.idempotencyKey === "kill-req-1",
+    );
     sendPhoneEncrypted("kill_request", {
       idempotencyKey: "kill-req-1",
       reason: "user cancellation",
@@ -795,12 +932,14 @@ async function main() {
     assert.strictEqual(killRes.body.detail, "stopped after current step");
 
     // Pending approval for that session must be auto-denied to the engine
-    const killApprovalRes = fakeEngine.resolutions.find((r) => r.approvalId === "appr-kill-pending-1");
+    const killApprovalRes = fakeEngine.resolutions.find(
+      (r) => r.approvalId === "appr-kill-pending-1",
+    );
     assert.ok(killApprovalRes, "Pending approval must be resolved on kill");
     assert.strictEqual(killApprovalRes.verdict, "denied");
 
     fakeEngine.taskDurationMs = 0;
-    console.log("CASE 7: PASS");
+    recordCase(7);
   } catch (err) {
     console.error("CASE 7: FAIL", err);
     process.exit(1);
@@ -824,7 +963,9 @@ async function main() {
     for (const b of fileSha256Bytes) fileSha256Hex += b.toString(16).padStart(2, "0");
 
     const transferId1 = "11223344556677889900aabbccddeeff";
-    const waitAccept1 = waitForDecrypted((k, b) => k === "file_accept" && b.transferId === transferId1);
+    const waitAccept1 = waitForDecrypted(
+      (k, b) => k === "file_accept" && b.transferId === transferId1,
+    );
 
     console.log("Sending file_offer...");
     sendPhoneEncrypted("file_offer", {
@@ -851,7 +992,9 @@ async function main() {
     }
     console.log("Chunks sent! Sending file_done...");
 
-    const waitReceived1 = waitForDecrypted((k, b) => k === "file_received" && b.transferId === transferId1);
+    const waitReceived1 = waitForDecrypted(
+      (k, b) => k === "file_received" && b.transferId === transferId1,
+    );
     sendPhoneEncrypted("file_done", { transferId: transferId1 });
     const recRes1 = await waitReceived1;
     console.log("file_received!");
@@ -866,7 +1009,9 @@ async function main() {
     // 2. Oversized offer rejected (> 25 MB)
     console.log("Subcase 8.2: sending oversized offer...");
     const transferIdOversized = "aabbccddeeff00112233445566778899";
-    const waitReject = waitForDecrypted((k, b) => k === "file_reject" && b.transferId === transferIdOversized);
+    const waitReject = waitForDecrypted(
+      (k, b) => k === "file_reject" && b.transferId === transferIdOversized,
+    );
     sendPhoneEncrypted("file_offer", {
       transferId: transferIdOversized,
       name: "huge.pdf",
@@ -887,7 +1032,9 @@ async function main() {
     let evilHashHex = "";
     for (const b of evilHashBytes) evilHashHex += b.toString(16).padStart(2, "0");
 
-    const waitAcceptEvil = waitForDecrypted((k, b) => k === "file_accept" && b.transferId === transferIdEvil);
+    const waitAcceptEvil = waitForDecrypted(
+      (k, b) => k === "file_accept" && b.transferId === transferIdEvil,
+    );
     sendPhoneEncrypted("file_offer", {
       transferId: transferIdEvil,
       name: "../../evil.sh",
@@ -905,11 +1052,16 @@ async function main() {
     });
     await new Promise((r) => setTimeout(r, 100));
 
-    const waitReceivedEvil = waitForDecrypted((k, b) => k === "file_received" && b.transferId === transferIdEvil);
+    const waitReceivedEvil = waitForDecrypted(
+      (k, b) => k === "file_received" && b.transferId === transferIdEvil,
+    );
     sendPhoneEncrypted("file_done", { transferId: transferIdEvil });
     const recEvil = await waitReceivedEvil;
 
-    assert.ok(!fs.existsSync(path.join(tmpDir, "evil.sh")), "Path traversal must not write to relative path");
+    assert.ok(
+      !fs.existsSync(path.join(tmpDir, "evil.sh")),
+      "Path traversal must not write to relative path",
+    );
     const safeInboxFile = path.join(tmpDir, "responder-data", "inbox", recEvil.body.fileId);
     assert.ok(fs.existsSync(safeInboxFile), "File must be safely written under fileId in inbox");
     console.log("Subcase 8.3: PASS");
@@ -918,7 +1070,9 @@ async function main() {
     // 4. Corrupted bytes -> file_error and FakeEngine never sees it
     console.log("Subcase 8.4: sending corrupted file...");
     const transferIdCorrupt = "00112233445566778899aabbccddeeff";
-    const waitAcceptCorrupt = waitForDecrypted((k, b) => k === "file_accept" && b.transferId === transferIdCorrupt);
+    const waitAcceptCorrupt = waitForDecrypted(
+      (k, b) => k === "file_accept" && b.transferId === transferIdCorrupt,
+    );
     sendPhoneEncrypted("file_offer", {
       transferId: transferIdCorrupt,
       name: "corrupt.pdf",
@@ -938,7 +1092,9 @@ async function main() {
     console.log("Subcase 8.4: chunk sent! Sending file_done...");
     await new Promise((r) => setTimeout(r, 60));
 
-    const waitCorruptErr = waitForDecrypted((k, b) => k === "file_error" && b.transferId === transferIdCorrupt);
+    const waitCorruptErr = waitForDecrypted(
+      (k, b) => k === "file_error" && b.transferId === transferIdCorrupt,
+    );
     sendPhoneEncrypted("file_done", { transferId: transferIdCorrupt });
     console.log("Subcase 8.4: waiting for file_error...");
     const errRes = await waitCorruptErr;
@@ -946,7 +1102,7 @@ async function main() {
     assert.strictEqual(errRes.body.code, "INTEGRITY_ERROR");
     console.log("Subcase 8.4: PASS");
 
-    console.log("CASE 8: PASS");
+    recordCase(8);
   } catch (err) {
     console.error("CASE 8: FAIL", err);
     process.exit(1);
@@ -985,7 +1141,7 @@ async function main() {
       staticKeypair: phoneX25519,
       remoteStaticPublicKey: base64ToBytes(advert.desktopPublicKey),
     });
-    const msg1 = initiator.writeMessage1(pairingPayload("skip-ref",advert));
+    const msg1 = initiator.writeMessage1(pairingPayload("skip-ref", advert));
 
     const rehandshakeReq = {
       v: 2,
@@ -1014,12 +1170,19 @@ async function main() {
       decrypt: (ct) => initiator.decrypt(ct),
     };
 
-    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    phoneRelayClient.send(
+      require("@bimax/core/session/lifecycle").buildTransportConfirmation(
+        phoneSession,
+        phoneDeviceId,
+      ),
+    );
     await new Promise((resolve) => setTimeout(resolve, 100));
     phoneE2EState = mobileNewE2EState();
 
     // 4. Re-request by key
-    const waitRecoveredResult = waitForDecrypted((k, b) => k === "command_result" && b.idempotencyKey === recoveryKey);
+    const waitRecoveredResult = waitForDecrypted(
+      (k, b) => k === "command_result" && b.idempotencyKey === recoveryKey,
+    );
     sendPhoneEncrypted("command_request", {
       idempotencyKey: recoveryKey,
       instruction: "Long background task",
@@ -1034,7 +1197,7 @@ async function main() {
       "Task must not execute twice; counter unchanged",
     );
 
-    console.log("CASE 9: PASS");
+    recordCase(9);
   } catch (err) {
     console.error("CASE 9: FAIL", err);
     process.exit(1);
@@ -1073,7 +1236,12 @@ async function main() {
 
     const grantEnv10 = await waitForMessage((m) => m.kind === "pairing_grant");
     phoneSession = phonePairingManager.handleGrant(grantEnv10);
-    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    phoneRelayClient.send(
+      require("@bimax/core/session/lifecycle").buildTransportConfirmation(
+        phoneSession,
+        phoneDeviceId,
+      ),
+    );
     await new Promise((resolve) => setTimeout(resolve, 100));
     phoneE2EState = mobileNewE2EState();
 
@@ -1103,23 +1271,16 @@ async function main() {
     const apprReq10 = await waitForDecrypted(
       (k, b) => k === "approval_request" && b.approvalId === "appr-case-10",
     );
-    const dec10 = buildApprovalDecision(
-      apprReq10.body,
-      "approved",
-      undefined,
-      Date.now(),
-    );
+    const dec10 = buildApprovalDecision(apprReq10.body, "approved", undefined, Date.now());
     const signedDec10 = signApprovalDecision(dec10, phoneEd25519.privateKey);
     sendPhoneEncrypted("approval_decision", signedDec10);
 
     await new Promise((r) => setTimeout(r, 200));
-    const resolution10 = fakeEngine.resolutions.find(
-      (r) => r.approvalId === "appr-case-10",
-    );
+    const resolution10 = fakeEngine.resolutions.find((r) => r.approvalId === "appr-case-10");
     assert.ok(resolution10, "FakeEngine must receive approval resolution");
     assert.strictEqual(resolution10.verdict, "approved");
 
-    console.log("CASE 10: PASS");
+    recordCase(10);
   } catch (err) {
     console.error("CASE 10: FAIL", err);
     process.exit(1);
@@ -1178,7 +1339,7 @@ async function main() {
     );
 
     fakeEngine.shouldFailInstruction = false;
-    console.log("CASE 11: PASS");
+    recordCase(11);
   } catch (err) {
     console.error("CASE 11: FAIL", err);
     process.exit(1);
@@ -1199,9 +1360,7 @@ async function main() {
 
     // Open 4 concurrent transfers
     for (let i = 0; i < 4; i++) {
-      const waitAcc = waitForDecrypted(
-        (k, b) => k === "file_accept" && b.transferId === tids[i],
-      );
+      const waitAcc = waitForDecrypted((k, b) => k === "file_accept" && b.transferId === tids[i]);
       sendPhoneEncrypted("file_offer", {
         transferId: tids[i],
         name: `concurrent-${i}.txt`,
@@ -1214,9 +1373,7 @@ async function main() {
     }
 
     // 5th concurrent transfer must be rejected
-    const waitRej = waitForDecrypted(
-      (k, b) => k === "file_reject" && b.transferId === tids[4],
-    );
+    const waitRej = waitForDecrypted((k, b) => k === "file_reject" && b.transferId === tids[4]);
     sendPhoneEncrypted("file_offer", {
       transferId: tids[4],
       name: "concurrent-4.txt",
@@ -1229,7 +1386,7 @@ async function main() {
     assert.strictEqual(rejRes.body.transferId, tids[4]);
     assert.strictEqual(rejRes.body.reason, "Too many concurrent transfers");
 
-    console.log("CASE 12: PASS");
+    recordCase(12);
   } catch (err) {
     console.error("CASE 12: FAIL", err);
     process.exit(1);
@@ -1251,34 +1408,56 @@ async function main() {
 
     const malformedRes = await waitMalformed;
     assert.strictEqual(malformedRes.body.ok, false);
-    assert.strictEqual(malformedRes.body.summary, "Request rejected or outcome unknown; check desktop before retrying");
+    assert.strictEqual(
+      malformedRes.body.summary,
+      "Request rejected or outcome unknown; check desktop before retrying",
+    );
     assert.strictEqual(malformedRes.body.idempotencyKey, "");
 
-    console.log("CASE 13: PASS");
+    recordCase(13);
   } catch (err) {
     console.error("CASE 13: FAIL", err);
     process.exit(1);
   }
 
   // PQ integration uses the same real relay and mobile client, with the feature enabled.
-  console.log("\n--- CASE 14: PQ pairing, prekey lookup, idempotent retry and refresh over WebSocket ---");
+  console.log(
+    "\n--- CASE 14: PQ pairing, prekey lookup, idempotent retry and refresh over WebSocket ---",
+  );
   await responder.stop();
   // Prior file-transfer cases deliberately saturate the relay's one-second rate window.
   await new Promise((resolve) => setTimeout(resolve, 1100));
   phoneSession = null;
   const pqResponder = new Responder({
-    identity: desktopIdentity, enginePort: fakeEngine, relayUrl, enablePqPairing: true,
+    identity: desktopIdentity,
+    enginePort: fakeEngine,
+    relayUrl,
+    enablePqPairing: true,
     hostControls: { setRemoteSessionActive: async () => {}, authorize: async () => true },
-    dataDir: path.join(tmpDir, "pq-responder-data"), wsImpl: WebSocket,
+    dataDir: path.join(tmpDir, "pq-responder-data"),
+    wsImpl: WebSocket,
   });
   try {
     await pqResponder.start();
     await new Promise((resolve) => setTimeout(resolve, 150));
     const advert = pqResponder.pairingManager.getAdvertisement();
-    phoneRelayClient.send({ v: 2, id: "pq-prekey-lookup", ts: Date.now(), from: phoneDeviceId,
-      to: desktopIdentity.deviceId, kind: "pairing_prekey_request", payload: { ref: advert.ref, pqPrekeyId: advert.pqPrekeyId } });
-    const lookup = await waitForMessage((m) => m.kind === "pairing_prekey" && m.payload.requestId === "pq-prekey-lookup");
-    const manager = new PhonePairingManager({ deviceId: phoneDeviceId, staticKeypair: phoneX25519, helloKeypair: phoneEd25519 });
+    phoneRelayClient.send({
+      v: 2,
+      id: "pq-prekey-lookup",
+      ts: Date.now(),
+      from: phoneDeviceId,
+      to: desktopIdentity.deviceId,
+      kind: "pairing_prekey_request",
+      payload: { ref: advert.ref, pqPrekeyId: advert.pqPrekeyId },
+    });
+    const lookup = await waitForMessage(
+      (m) => m.kind === "pairing_prekey" && m.payload.requestId === "pq-prekey-lookup",
+    );
+    const manager = new PhonePairingManager({
+      deviceId: phoneDeviceId,
+      staticKeypair: phoneX25519,
+      helloKeypair: phoneEd25519,
+    });
     const request = manager.beginPairing(advert, lookup.payload.publicKey);
     phoneRelayClient.send(request);
     const lost = await waitForMessage((m) => m.kind === "pairing_grant");
@@ -1288,29 +1467,66 @@ async function main() {
     assert.deepEqual(retried, lost);
     phoneSession = manager.handleGrant(retried);
     assert.equal(pqResponder.sendEncrypted("agent_status", { state: "idle" }), false);
-    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    phoneRelayClient.send(
+      require("@bimax/core/session/lifecycle").buildTransportConfirmation(
+        phoneSession,
+        phoneDeviceId,
+      ),
+    );
     await new Promise((resolve) => setTimeout(resolve, 100));
-    await pqResponder.confirmTrustedPhone(pqResponder.pairingManager.getCandidatePairing().verificationCode);
+    await pqResponder.confirmTrustedPhone(
+      pqResponder.pairingManager.getCandidatePairing().verificationCode,
+    );
     phoneE2EState = mobileNewE2EState();
     const waitSessions = waitForDecrypted((k) => k === "session_list");
     sendPhoneEncrypted("session_list_request", {});
     await waitSessions;
     const next = phoneSession.nextPqPrekey;
-    const freshManager = new PhonePairingManager({ deviceId: phoneDeviceId, staticKeypair: phoneX25519, helloKeypair: phoneEd25519 });
+    const freshManager = new PhonePairingManager({
+      deviceId: phoneDeviceId,
+      staticKeypair: phoneX25519,
+      helloKeypair: phoneEd25519,
+    });
     phoneRelayClient.send(freshManager.beginPairing(next.advertisement, next.publicKey));
     const nextGrant = await waitForMessage((m) => m.kind === "pairing_grant");
     phoneSession = freshManager.handleGrant(nextGrant);
-    phoneRelayClient.send(require("@bimax/core/session/lifecycle").buildTransportConfirmation(phoneSession, phoneDeviceId));
+    phoneRelayClient.send(
+      require("@bimax/core/session/lifecycle").buildTransportConfirmation(
+        phoneSession,
+        phoneDeviceId,
+      ),
+    );
     phoneE2EState = mobileNewE2EState();
     await new Promise((resolve) => setTimeout(resolve, 100));
     const afterRefresh = waitForDecrypted((k) => k === "session_list");
     sendPhoneEncrypted("session_list_request", {});
     await afterRefresh;
-    manager.destroy(); freshManager.destroy();
-    console.log("CASE 14: PASS");
-  } finally { await pqResponder.stop(); }
+    manager.destroy();
+    freshManager.destroy();
+    recordCase(14);
+  } finally {
+    await pqResponder.stop();
+  }
   // Teardown
   console.log("\n=== ALL FOURTEEN INTEGRATION CASES PASSED ===");
+  assert.deepEqual(
+    [...passedCases].sort((a, b) => a - b),
+    Array.from({ length: 14 }, (_, i) => i + 1),
+  );
+  if (process.env.BIMAX_INTEGRATION_REPORT)
+    fs.writeFileSync(
+      process.env.BIMAX_INTEGRATION_REPORT,
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          protocolVersion: 2,
+          passedCases: [...passedCases].sort((a, b) => a - b),
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
   phoneRelayClient.close();
   cleanup();
   process.exit(0);

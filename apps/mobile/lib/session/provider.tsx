@@ -1,3 +1,9 @@
+import { SessionCreateClient } from "./session-create-client";
+import { LiveConversationClient } from "./live-client";
+import { HistoryClient } from "./history-client";
+import { AppState, Platform } from "react-native";
+import { relaySocketConstructor, type NativeWebSocketConstructor } from "../relay/native-socket";
+import { pairingTimeout } from "./pairing-progress";
 import {
   PairingAttemptScope,
   sameDesktopTrust,
@@ -8,7 +14,7 @@ import { buildTransportConfirmation } from "@bimax/core/session/lifecycle";
 import { PqPrekeyLookup } from "@bimax/core/session/prekey-lookup";
 import { randomId } from "../crypto/keys";
 import { requireActiveAccount, isActiveAccount } from "../account-scope";
-import { authorizeRelayUrl } from "../gateway";
+import { authorizeRelayUrl, registerPairedCloud } from "../gateway";
 import { pendingOperations, acknowledgeOperation } from "../operation-outbox";
 import {
   createContext,
@@ -20,6 +26,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  RemoteConversation,
   Envelope,
   MessageKind,
   ToolApprovalRequest,
@@ -29,6 +36,7 @@ import type {
   EncryptedPayload,
   AgentStatus,
   AgentSessionInfo,
+  MacWorkspace,
   KillResult,
   ChatDone,
 } from "@bimax/protocol";
@@ -95,6 +103,9 @@ export interface PendingFileTransfer {
 export interface RelayContextValue {
   status: ClientStatus | "idle";
   connectionError: string | null;
+  connectionRoute: "cloud" | "lan" | "none";
+  cloudError: string | null;
+  retryCloud: () => void;
   trustedDesktop: TrustedDesktop | null;
   refreshTrustedDesktop: (verified: EstablishedSession) => Promise<void>;
   sessions: EstablishedSession[];
@@ -107,11 +118,25 @@ export interface RelayContextValue {
   pairWithDesktop: (advert: PairingAdvertisement) => Promise<EstablishedSession>;
   agentStatus: AgentStatus | null;
   remoteSessions: AgentSessionInfo[];
+  remoteWorkspaces: MacWorkspace[];
+  canCreateSessions: boolean;
+  createMacSession: (
+    workspaceId: string,
+    requestId: string,
+    signal?: AbortSignal,
+  ) => Promise<string>;
   commandLog: CommandLogEntry[];
   sendInstruction: (instruction: string) => Promise<void>;
   sendRemoteChat: (options: RemoteChatOptions) => Promise<ChatDone>;
   sendRemoteFile: (file: RemoteFileInput) => Promise<string>;
   requestSessionList: () => void;
+  watchConversation: (
+    id: string,
+    onUpdate: (snapshot: RemoteConversation) => void,
+    onError: (error: Error) => void,
+    signal?: AbortSignal,
+  ) => () => void;
+  requestSessionHistory: (id: string, signal?: AbortSignal) => Promise<RemoteConversation>;
   sendKill: (reason?: string) => Promise<void>;
   lastKillAck: KillResult | null;
 }
@@ -139,6 +164,7 @@ interface UserPairing {
 export function RelayProvider({ children }: { children: ReactNode }) {
   const owner = requireActiveAccount();
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [cloudError, setCloudError] = useState<string | null>(null);
   const [status, setStatus] = useState<ClientStatus | "idle">("idle");
   const [trustedDesktop, setTrustedDesktop] = useState<TrustedDesktop | null>(null);
   const [lastKillAck, setLastKillAck] = useState<KillResult | null>(null);
@@ -189,6 +215,23 @@ export function RelayProvider({ children }: { children: ReactNode }) {
   const recoverRef = useRef<() => void>(() => {});
   const lastFlushRef = useRef(0);
   const flushRef = useRef<() => Promise<void>>(async () => {});
+  const historyRef = useRef(new HistoryClient());
+  const creationRef = useRef(new SessionCreateClient());
+  const [remoteWorkspaces, setRemoteWorkspaces] = useState<MacWorkspace[]>([]);
+  const [canCreateSessions, setCanCreateSessions] = useState(false);
+  const liveRef = useRef(new LiveConversationClient(historyRef.current));
+  const connectRouteRef = useRef<(url: string) => RelayClient>(() => {
+    throw Error("Connection is starting");
+  });
+  const encryptedSendRef = useRef<RelayContextValue["sendEncrypted"]>(() => {
+    throw Error("Connection is starting");
+  });
+  const failoverRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const cloudSetupRef = useRef<{
+    session: EstablishedSession;
+    working: boolean;
+    relayUrl?: string;
+  } | null>(null);
   const candidatesRef = useRef(new Map<string, EstablishedSession>());
   const e2eStateRef = useRef(new Map<string, E2EState>());
 
@@ -230,6 +273,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
               for (const s of sessionsRef.current) {
                 if (s.peerDeviceId === deviceId) s.destroy?.();
               }
+              historyRef.current.clear();
+              creationRef.current.clear();
+              liveRef.current.clear();
               sessionsRef.current = [];
               setSessions([]);
             } else if (presenceStatus === "online") {
@@ -260,6 +306,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
               });
             } catch {
               session.destroy?.();
+              historyRef.current.clear();
+              creationRef.current.clear();
+              liveRef.current.clear();
               sessionsRef.current = [];
               setSessions([]);
               recoveryScopeRef.current.cancel();
@@ -331,6 +380,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
                   ...sessionsRef.current.filter((s) => s.peerDeviceId !== peerId),
                   session,
                 ];
+                historyRef.current.clear();
+                creationRef.current.clear();
+                liveRef.current.clear();
                 sessionsRef.current = next;
                 setSessions(next);
                 void flushRef.current();
@@ -348,6 +400,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
               manager.destroy();
               setSessions((prev) => {
                 const next = prev.filter((s) => s.peerDeviceId !== peerId);
+                historyRef.current.clear();
+                creationRef.current.clear();
+                liveRef.current.clear();
                 sessionsRef.current = next;
                 return next;
               });
@@ -375,6 +430,86 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           },
           onAgentStatus: (nextStatus) => {
             setAgentStatus(nextStatus);
+          },
+          onCloudSetup: (payload) => {
+            const value = payload as Record<string, unknown>,
+              trusted = trustedRef.current;
+            const session = sessionsRef.current.find((s) => s.peerDeviceId === trusted?.deviceId);
+            if (!value || !trusted || !session) return;
+            if (value.action === "register" && value.deviceId === trusted.deviceId) {
+              if (cloudSetupRef.current?.working && cloudSetupRef.current.session === session)
+                return;
+              cloudSetupRef.current = { session, working: true };
+              setCloudError(null);
+              void (async () => {
+                let last: unknown;
+                for (let attempt = 0; attempt < 3; attempt++) {
+                  if (requireActiveAccount() !== owner || !sessionsRef.current.includes(session))
+                    return;
+                  try {
+                    const grant = await registerPairedCloud(
+                      value,
+                      () =>
+                        requireActiveAccount() === owner && sessionsRef.current.includes(session),
+                    );
+                    if (requireActiveAccount() !== owner || !sessionsRef.current.includes(session))
+                      return;
+                    if (cloudSetupRef.current?.session === session)
+                      cloudSetupRef.current.relayUrl = grant.relayUrl;
+                    encryptedSendRef.current(trusted.deviceId, "cloud_setup", {
+                      ...grant,
+                      action: "grant",
+                    });
+                    return;
+                  } catch (e) {
+                    last = e;
+                    if (attempt < 2) await new Promise((r) => setTimeout(r, 1500));
+                  }
+                }
+                if (requireActiveAccount() === owner && sessionsRef.current.includes(session))
+                  setCloudError(
+                    last instanceof Error
+                      ? last.message
+                      : "Could not enable connection from anywhere",
+                  );
+              })().finally(() => {
+                if (cloudSetupRef.current?.session === session)
+                  cloudSetupRef.current.working = false;
+              });
+            } else if (
+              value.action === "ready" &&
+              typeof value.relayUrl === "string" &&
+              value.relayUrl === cloudSetupRef.current?.relayUrl &&
+              cloudSetupRef.current.session === session
+            ) {
+              const relayUrl = value.relayUrl as string;
+              if (trusted.relayUrl !== relayUrl || trusted.lastWorking !== "cloud") {
+                const updated = {
+                  ...trusted,
+                  relayUrl,
+                  lanRelayUrl:
+                    trusted.lanRelayUrl ??
+                    (trusted.relayUrl.startsWith("ws:") ? trusted.relayUrl : undefined),
+                  lastWorking: "cloud" as const,
+                };
+                trustedRef.current = updated;
+                setTrustedDesktop(updated);
+                void saveTrustedDesktop(updated).catch(() => {});
+              }
+              setCloudError(null);
+              if (clientUrlRef.current !== relayUrl) connectRouteRef.current(relayUrl);
+            } else if (value.action === "error")
+              setCloudError(
+                "Could not enable connection from anywhere. Local chat is still connected.",
+              );
+          },
+          onWatchStatus: (payload) => liveRef.current.status(payload),
+          onSessionUpdate: (payload) => liveRef.current.update(payload),
+          onHistoryChunk: (payload) => historyRef.current.handle(payload),
+          onSessionCreated: (value) => creationRef.current.handle(value),
+          onWorkspaces: (workspaces, supported) => {
+            setRemoteWorkspaces(workspaces);
+            setCanCreateSessions(supported);
           },
           onSessionList: (validSessions) => {
             setRemoteSessions(validSessions);
@@ -471,14 +606,45 @@ export function RelayProvider({ children }: { children: ReactNode }) {
           if (typeof WebSocket === "undefined") {
             throw new Error("Global WebSocket is not available");
           }
-          return WebSocket as unknown as WsImpl;
+          return relaySocketConstructor(
+            WebSocket as unknown as NativeWebSocketConstructor,
+            Platform.OS !== "web",
+          );
         })(),
         helloSigner: helloSignerRef.current ?? undefined,
         onStatus: (s) => {
           statusRef.current = s;
           setStatus(s);
+          if (s === "online") {
+            clearTimeout(failoverRef.current);
+            failoverRef.current = undefined;
+          } else if (
+            s === "reconnecting" &&
+            !failoverRef.current &&
+            trustedRef.current?.lanRelayUrl &&
+            trustedRef.current.relayUrl.startsWith("wss:")
+          ) {
+            failoverRef.current = setTimeout(() => {
+              failoverRef.current = undefined;
+              const trusted = trustedRef.current;
+              if (!trusted || statusRef.current === "online" || requireActiveAccount() !== owner)
+                return;
+              const alternative =
+                clientUrlRef.current === trusted.relayUrl ? trusted.lanRelayUrl : trusted.relayUrl;
+              if (alternative && alternative !== clientUrlRef.current)
+                connectRouteRef.current(alternative);
+            }, 2000);
+          }
           if (s !== "online") {
+            setRemoteWorkspaces([]);
+            setCanCreateSessions(false);
+            historyRef.current.clear();
+            creationRef.current.clear();
+            liveRef.current.clear();
             for (const session of sessionsRef.current) session.destroy?.();
+            historyRef.current.clear();
+            creationRef.current.clear();
+            liveRef.current.clear();
             sessionsRef.current = [];
             setSessions([]);
             e2eStateRef.current.clear();
@@ -491,8 +657,31 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       client.connect();
       return client;
     },
-    [handleIncoming],
+    [handleIncoming, owner],
   );
+
+  useEffect(() => {
+    let wasBackground = false;
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "background") wasBackground = true;
+      if (state !== "active" || !wasBackground) return;
+      wasBackground = false;
+      const trusted = trustedRef.current;
+      if (!trusted || !aliveRef.current || !isActiveAccount(owner) || userScopeRef.current.busy)
+        return;
+      // iOS can suspend an apparently open socket across a network change.
+      // Resume with a fresh transport/Noise baseline, using the existing pinned trust.
+      clientRef.current?.close();
+      clientRef.current = null;
+      clientUrlRef.current = null;
+      connectToRelay(
+        trusted.lastWorking === "lan" && trusted.lanRelayUrl
+          ? trusted.lanRelayUrl
+          : trusted.relayUrl,
+      );
+    });
+    return () => subscription.remove();
+  }, [connectToRelay, owner]);
 
   const sendEncrypted = useCallback(
     (to: string, kind: MessageKind, payload: unknown): void => {
@@ -525,6 +714,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     [getE2EState],
   );
 
+  connectRouteRef.current = connectToRelay;
+  encryptedSendRef.current = sendEncrypted;
+
   const getSession = useCallback(
     (peerId: string): EstablishedSession | undefined => {
       return sessions.find((s) => s.peerDeviceId === peerId);
@@ -532,8 +724,61 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     [sessions],
   );
 
+  const watchConversation = useCallback(
+    (
+      id: string,
+      onUpdate: (snapshot: RemoteConversation) => void,
+      onError: (error: Error) => void,
+      signal?: AbortSignal,
+    ) => {
+      const peer = trustedRef.current?.deviceId,
+        session = sessions.find((s) => s.peerDeviceId === peer);
+      if (!peer || !session || statusRef.current !== "online") {
+        onError(new Error("Reconnecting to your Mac…"));
+        return () => {};
+      }
+      return liveRef.current.watch(
+        id,
+        (kind, body) => {
+          if (
+            requireActiveAccount() !== owner ||
+            trustedRef.current?.deviceId !== peer ||
+            !sessionsRef.current.includes(session)
+          )
+            throw Error("Secure connection changed");
+          sendEncrypted(peer, kind, body);
+        },
+        onUpdate,
+        onError,
+        signal,
+      );
+    },
+    [owner, sendEncrypted, sessions],
+  );
+
+  const requestSessionHistory = useCallback(
+    (id: string, signal?: AbortSignal) => {
+      const peer = trustedRef.current?.deviceId;
+      if (
+        !peer ||
+        statusRef.current !== "online" ||
+        !sessionsRef.current.some((session) => session.peerDeviceId === peer)
+      )
+        return Promise.reject(new Error("Reconnect to your Mac before opening a conversation"));
+      return historyRef.current.read(
+        id,
+        (request) => sendEncrypted(peer, "session_history_request", request),
+        signal,
+      );
+    },
+    [sendEncrypted],
+  );
+
   const dropSession = useCallback(
     (peerDeviceId: string): void => {
+      historyRef.current.clear();
+      creationRef.current.clear();
+      liveRef.current.clear();
       userScopeRef.current.cancel();
       recoveryScopeRef.current.cancel();
       prekeyLookupRef.current.destroy();
@@ -552,6 +797,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       for (const session of sessionsRef.current)
         if (session.peerDeviceId === peerDeviceId) session.destroy?.();
       const next = sessionsRef.current.filter((session) => session.peerDeviceId !== peerDeviceId);
+      historyRef.current.clear();
+      creationRef.current.clear();
+      liveRef.current.clear();
       sessionsRef.current = next;
       setSessions(next);
       const trusted = trustedRef.current;
@@ -661,7 +909,7 @@ export function RelayProvider({ children }: { children: ReactNode }) {
             userPairingsRef.current.delete(advert.desktopDeviceId);
           lease.finish();
           pendingManager.destroy();
-          reject(new Error("Pairing timed out after 60s waiting for desktop approval"));
+          reject(new Error(pairingTimeout(statusRef.current)));
         }, 60000);
         userPairingsRef.current.set(advert.desktopDeviceId, {
           manager: pendingManager,
@@ -702,6 +950,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       trustedRef.current = null;
       setTrustedDesktop(null);
       for (const session of sessionsRef.current) session.destroy?.();
+      historyRef.current.clear();
+      creationRef.current.clear();
+      liveRef.current.clear();
       sessionsRef.current = [];
       setSessions([]);
       try {
@@ -719,6 +970,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
         setTrustedDesktop(trusted);
         userScopeRef.current.cancel();
         candidatesRef.current.delete(verified.peerDeviceId);
+        historyRef.current.clear();
+        creationRef.current.clear();
+        liveRef.current.clear();
         sessionsRef.current = [verified];
         setSessions([verified]);
         void flushRef.current();
@@ -977,9 +1231,14 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     const privateKeys = ownedPrivateKeys.current;
     const candidates = candidatesRef.current;
     const e2eStates = e2eStateRef.current;
+    const history = historyRef.current;
+    const creation = creationRef.current;
+    const live = liveRef.current;
     init();
     return () => {
       isMounted = false;
+      clearTimeout(failoverRef.current);
+      failoverRef.current = undefined;
       aliveRef.current = false;
       userScope.cancel();
       recoveryScope.cancel();
@@ -1010,6 +1269,9 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       prekeyLookup.destroy();
       rehandshakePairingRef.current?.manager.destroy();
       candidates.clear();
+      history.clear();
+      creation.clear();
+      live.clear();
       e2eStates.clear();
       helloSignerRef.current = null;
       sessionsRef.current = [];
@@ -1059,15 +1321,54 @@ export function RelayProvider({ children }: { children: ReactNode }) {
       );
       if (!expired) return;
       for (const session of sessionsRef.current) session.destroy?.();
+      historyRef.current.clear();
+      creationRef.current.clear();
+      liveRef.current.clear();
       sessionsRef.current = [];
       setSessions([]);
       recoverRef.current();
     }, 30_000);
     return () => clearInterval(timer);
   }, []);
+  const createMacSession = useCallback(
+    (workspaceId: string, requestId: string, signal?: AbortSignal) => {
+      const peer = trustedRef.current?.deviceId;
+      if (
+        !peer ||
+        !isActiveAccount(owner) ||
+        !sessionsRef.current.some((s) => s.peerDeviceId === peer)
+      )
+        return Promise.reject(Error("Connect to your Mac first"));
+      return creationRef.current.create(
+        requestId,
+        workspaceId,
+        (request) => sendEncrypted(peer, "session_create_request", request),
+        signal,
+      );
+    },
+    [owner, sendEncrypted],
+  );
   const value: RelayContextValue = {
     status,
     connectionError,
+    connectionRoute:
+      status === "online" && sessions.some((s) => s.peerDeviceId === trustedDesktop?.deviceId)
+        ? clientUrlRef.current?.startsWith("wss:")
+          ? "cloud"
+          : "lan"
+        : "none",
+    cloudError,
+    retryCloud: () => {
+      const peer = trustedRef.current?.deviceId;
+      if (peer) {
+        setCloudError(null);
+        try {
+          sendEncrypted(peer, "cloud_setup", { action: "request" });
+        } catch {
+          setCloudError("Reconnect to your Mac to enable access from anywhere");
+        }
+      }
+    },
     trustedDesktop,
     refreshTrustedDesktop,
     sessions,
@@ -1080,11 +1381,16 @@ export function RelayProvider({ children }: { children: ReactNode }) {
     pairWithDesktop,
     agentStatus,
     remoteSessions,
+    remoteWorkspaces,
+    canCreateSessions,
+    createMacSession,
     commandLog,
     sendInstruction,
     sendRemoteChat,
     sendRemoteFile,
     requestSessionList,
+    requestSessionHistory,
+    watchConversation,
     sendKill,
     lastKillAck,
   };

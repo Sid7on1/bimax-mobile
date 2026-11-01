@@ -22,6 +22,7 @@ export interface Env {
   TEST_JWKS?: JSONWebKeySet;
   MODEL_PRICES_JSON?: string;
   RELAY_TICKET_SECRET?: string;
+  RELAY_PUBLIC_URL?: string;
   MAX_OUTPUT_TOKENS?: string;
   ALLOWED_ORIGINS?: string;
   GLOBAL_MONTHLY_MICROUSD?: string;

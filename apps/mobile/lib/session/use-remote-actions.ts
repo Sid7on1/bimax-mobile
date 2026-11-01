@@ -1,5 +1,5 @@
 import { useCallback, type Dispatch, type SetStateAction, type MutableRefObject } from "react";
-import * as LocalAuthentication from "expo-local-authentication";
+import {confirmPhoneDecision} from "../approvals/device-auth";
 import type {
   MessageKind,
   ToolApprovalRequest,
@@ -145,6 +145,7 @@ export function useRemoteActions({
   const sendRemoteChat = useCallback(
     async (options: RemoteChatOptions): Promise<ChatDone> => {
       const desktopId = requireDesktopId();
+      if (requireActiveAccount() !== owner) throw new Error("Account changed");
       const trimmed = options.text.trim();
       if (!trimmed && (!options.fileIds || options.fileIds.length === 0)) {
         throw new Error("Chat message requires text or attached files");
@@ -166,6 +167,9 @@ export function useRemoteActions({
         body: msg,
         expiresAt: now + 120_000,
       });
+
+      if (requireActiveAccount() !== owner || trustedRef.current?.deviceId !== desktopId)
+        throw new Error("Account or paired Mac changed");
 
       return new Promise<ChatDone>((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -192,7 +196,7 @@ export function useRemoteActions({
         }
       });
     },
-    [requireDesktopId, sendEncrypted, pendingChatsRef, sessionsRef, statusRef],
+    [owner, requireDesktopId, sendEncrypted, pendingChatsRef, sessionsRef, statusRef, trustedRef],
   );
 
   const sendRemoteFile = useCallback(
@@ -308,12 +312,7 @@ export function useRemoteActions({
 
       await decideWithBiometric({
         requestBiometric: async () => {
-          const authRes = await LocalAuthentication.authenticateAsync({
-            promptMessage: `Approve ${req.tool}?`,
-            disableDeviceFallback: true,
-            biometricsSecurityLevel: "strong",
-          });
-          return authRes.success;
+          return confirmPhoneDecision(`Approve ${req.tool}?`);
         },
         build: () => buildApprovalDecision(req, "approved"),
         sign: (unsigned) => ({ ...unsigned, signature: "" }),
@@ -370,13 +369,8 @@ export function useRemoteActions({
         throw new Error("No trusted desktop configured for approvals");
       }
 
-      const auth = await LocalAuthentication.authenticateAsync({
-        promptMessage: `Deny ${req.tool}?`,
-        disableDeviceFallback: true,
-        biometricsSecurityLevel: "strong",
-      });
-      if (!auth.success || requireActiveAccount() !== owner)
-        throw new Error("Authentication required");
+      const authenticated = await confirmPhoneDecision(`Deny ${req.tool}?`);
+      if (!authenticated || requireActiveAccount() !== owner) throw new Error("Authentication required");
       const privKey = await getEd25519PrivateKey();
       const unsigned = buildApprovalDecision(req, "denied", reason);
       const signed = signApprovalDecision(unsigned, privKey);

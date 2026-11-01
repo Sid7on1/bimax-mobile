@@ -1,3 +1,4 @@
+import { URL } from "node:url";
 import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import type { Env } from "../src/auth";

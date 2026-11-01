@@ -14,6 +14,13 @@ const cases = [
   [tscCli, "-p", "packages/core/tsconfig.json"],
   [tscCli, "-p", "apps/relay/tsconfig.json"],
   [tscCli, "-p", "apps/desktop-responder/tsconfig.json"],
+  ["apps/mobile/test/auth-flow-test.mjs"],
+  ["apps/mobile/test/chat-stream-test.mjs"],
+  ["apps/mobile/test/preferences-test.mjs"],
+  ["apps/mobile/test/renderer-recovery-test.mjs"],
+  ["apps/mobile/test/preferences-mutations.mjs"],
+  ["apps/mobile/test/native-pairing-test.mjs"],
+  ["apps/mobile/test/device-auth-test.mjs"],
   ["packages/core/test/pq-test.mjs"],
   ["packages/core/test/security-review-test.mjs"],
   [
@@ -40,6 +47,8 @@ const cases = [
   ["artifacts/audit/reproduce-findings.cjs"],
   ["artifacts/audit/security-regressions-round-3.cjs"],
   ["scripts/platform-test.mjs"],
+  ["scripts/relay-admission-test.mjs"],
+  ["scripts/test-linked-ui.mjs"],
 ];
 for (const args of cases) {
   console.log(`\nRunning ${args.join(" ")}`);
